@@ -207,7 +207,7 @@ export class AgentLoop {
         })
         let result: { kind: "ok"; output: unknown } | { kind: "err"; message: string }
         const path = String((call.input as { path?: string }).path ?? "")
-        if ((tool.name === "write" || tool.name === "patch") && path && !readFiles.includes(path)) {
+        if ((tool.name === "write" || tool.name === "patch" || tool.name === "delete") && path && !readFiles.includes(path)) {
           const resolved = path.startsWith("/") ? path : resolve(req.cwd, path)
           try {
             await access(resolved)
@@ -245,7 +245,12 @@ export class AgentLoop {
         if (toolMatchesFileMutation(tool)) {
           fileChanges.push({
             path: String((call.input as { path?: string }).path ?? "?"),
-            kind: tool.kind === "write" || tool.name === "write" ? "write" : "patch",
+            kind:
+              tool.name === "delete"
+                ? "delete"
+                : tool.kind === "write" || tool.name === "write"
+                  ? "write"
+                  : "patch",
             at: finishedAt,
           })
         }
@@ -314,7 +319,7 @@ function toolMessageContent(
 }
 
 function toolMatchesFileMutation(tool: Tool): boolean {
-  return tool.name === "write" || tool.name === "patch"
+  return tool.name === "write" || tool.name === "patch" || tool.name === "delete"
 }
 
 function appendAssistantText(session: SessionState, text: string): SessionState {

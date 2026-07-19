@@ -17,7 +17,9 @@ export class InMemorySessionStore implements SessionStore {
     if (!state.id) {
       throw new Error("InMemorySessionStore.save: state.id is required")
     }
-    const next: SessionState = { ...state, updatedAt: new Date().toISOString() }
+    // Deep-clone so stored state does not share array references with the caller.
+    const next: SessionState = structuredClone(state)
+    next.updatedAt = new Date().toISOString()
     this.map.set(state.id, next)
   }
 

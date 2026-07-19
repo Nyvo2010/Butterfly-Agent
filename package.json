@@ -4,8 +4,8 @@
   "description": "Butterfly Agent — intelligent agent system",
   "private": true,
   "scripts": {
-    "dev": "echo 'TODO: start dev server' && exit 1",
-    "build": "echo 'TODO: build all packages' && exit 1",
+    "dev": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc -p tsconfig.json --noEmit false",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "biome check .",

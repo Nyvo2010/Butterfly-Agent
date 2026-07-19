@@ -1,10 +1,12 @@
-import { AgentLoop, ModelRouter } from "@butterfly/agent"
+import { AgentLoop, ModelRouter, Subagent } from "@butterfly/agent"
 import { COE, GPTTokenizer, SCE } from "@butterfly/context"
 import { loadConfig, log } from "@butterfly/core"
-import { ForgivingToolCallParser, MockLLMClient, textResponse, toolCallResponse, VercelAILLMClient } from "@butterfly/llm"
-import { createSession, InMemorySessionStore } from "@butterfly/session"
+import { ForgivingToolCallParser, VercelAILLMClient } from "@butterfly/llm"
+import { createSession, FileSystemSessionStore } from "@butterfly/session"
 import {
   bashTool,
+  createSubagentTool,
+  deleteTool,
   globTool,
   grepTool,
   listTool,
@@ -17,28 +19,22 @@ import {
 export interface RunOptions {
   task: string
   cwd: string
-  /** Force MockLLM regardless of LLM_API_KEY env. */
-  mockLLM?: boolean
-  /** Custom scripted sequence for the MockLLM (overrides default). */
-  script?: import("@butterfly/llm").LLMResponse[]
   /** Cap loop iterations (default 20). */
   maxSteps?: number
 }
 
-export interface RunOutput {
-  result: Awaited<ReturnType<AgentLoop["run"]>>
-  usedMock: boolean
-}
-
-export async function runAgent(opts: RunOptions): Promise<RunOutput> {
+export async function runAgent(opts: RunOptions) {
   const cfg = loadConfig()
-  const hasKey = Boolean(cfg.llm.apiKey)
-  const useMock = opts.mockLLM ?? !hasKey
+  if (!cfg.llm.apiKey) {
+    throw new Error(
+      "LLM_API_KEY is required. Set it in .env or as an environment variable.",
+    )
+  }
+
   log("info", "cli.run.start", {
     cwd: opts.cwd,
     task: opts.task.slice(0, 200),
-    usedMock: useMock,
-    hasKey,
+    model: cfg.llm.baseUrl || "default",
   })
 
   const tokenizer = new GPTTokenizer()
@@ -48,16 +44,18 @@ export async function runAgent(opts: RunOptions): Promise<RunOutput> {
   registry.register(readTool)
   registry.register(writeTool)
   registry.register(patchTool)
+  registry.register(deleteTool)
   registry.register(bashTool)
   registry.register(grepTool)
   registry.register(globTool)
   registry.register(listTool)
 
-  const llm = useMock
-    ? new MockLLMClient(opts.script ?? defaultScript(opts.task, opts.cwd))
-    : new VercelAILLMClient({ apiKey: cfg.llm.apiKey, baseUrl: cfg.llm.baseUrl || undefined })
+  const llm = new VercelAILLMClient({
+    apiKey: cfg.llm.apiKey,
+    baseUrl: cfg.llm.baseUrl || undefined,
+  })
 
-  const store = new InMemorySessionStore()
+  const store = new FileSystemSessionStore(opts.cwd)
   const loop = new AgentLoop({
     llm,
     sce: new SCE(tokenizer),
@@ -67,6 +65,15 @@ export async function runAgent(opts: RunOptions): Promise<RunOutput> {
     store,
     parser: new ForgivingToolCallParser(),
   })
+
+  // Wire the subagent tool AFTER constructing the loop, then register it.
+  // This avoids a circular dependency: tools → agent → tools.
+  const subagent = new Subagent(loop)
+  const subagentTool = createSubagentTool({
+    spawn: (task, cwd, mode, maxSteps) =>
+      subagent.spawn({ task, cwd, mode: mode as "plan" | "build", maxSteps }),
+  })
+  registry.register(subagentTool)
 
   const session = createSession("cli-session", "build")
   const result = await loop.run({
@@ -80,29 +87,5 @@ export async function runAgent(opts: RunOptions): Promise<RunOutput> {
     stopReason: result.stopReason,
     filesChanged: result.session.fileChanges.map((f) => f.path),
   })
-  return { result, usedMock: useMock }
-}
-
-function defaultScript(task: string, _cwd: string): import("@butterfly/llm").LLMResponse[] {
-  // Default safe script: glob anything → read the README → write a FINDINGS.md → text-end.
-  const lower = task.toLowerCase()
-  if (lower.includes("readme") || lower.includes("summary") || lower.includes("summarize")) {
-    return [
-      toolCallResponse([{ id: "c1", name: "glob", input: { pattern: "**/*.md" } }]),
-      toolCallResponse([{ id: "c2", name: "read", input: { path: "README.md" } }]),
-      toolCallResponse([
-        {
-          id: "c3",
-          name: "write",
-          input: { path: "FINDINGS.md", content: "## Summary\nDemo findings from CLI run." },
-        },
-      ]),
-      textResponse("Done. See FINDINGS.md."),
-    ]
-  }
-  return [
-    toolCallResponse([{ id: "c1", name: "list", input: { path: "." } }]),
-    toolCallResponse([{ id: "c2", name: "read", input: { path: "package.json" } }]),
-    textResponse("Done."),
-  ]
+  return result
 }
