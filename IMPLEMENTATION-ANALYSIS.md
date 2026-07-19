@@ -715,3 +715,89 @@ The remaining gaps are:
 3. **LLM errors cause CLI exit** — no retry/backoff on `llm.complete()` failures
 
 **Bottom line:** The implementation is correct and feature-complete for MVP. The three previously identified major gaps (no subagent tool, no disk persistence, mock in production path) are all resolved. The system is ready for testing with a real LLM provider.
+
+---
+
+## 13. Future Roadmap — Toward Opencode Parity
+
+> Updated: July 19, 2026 (post config/MCP/plugin/rollback implementation round)
+
+### 13.1 What Was Implemented (Rounds 1 + 2)
+
+| Feature | Where |
+|---|---|
+| Permission system (hook interface) | `packages/agent/src/loop.ts` |
+| Streaming LLM responses (`completeStream()`) | `packages/llm/src/vercel-adapter.ts`, `mock-llm.ts` |
+| LLM retry with exponential backoff + jitter | `packages/llm/src/vercel-adapter.ts` |
+| Multimodal/vision support | `packages/llm/src/types.ts`, `vercel-adapter.ts` |
+| Parallel tool execution | `packages/agent/src/loop.ts` |
+| Session resume (`--resume=<id>`) and list | `apps/cli/src/index.ts`, `run.ts` |
+| File checkpointing (before/after on mutations) | `packages/agent/src/loop.ts` |
+| Unified diff patch tool (`diff_patch`) | `packages/tools/src/tools/diff-patch.ts` |
+| Global session storage (`~/.butterfly/sessions`) | `packages/session/src/fs-store.ts` |
+| Background bash tools | `packages/tools/src/tools/background-bash.ts` |
+| **Opencode-compatible config system** (`butterfly.json`) | `core/src/butterfly-config.ts` |
+| **Custom instructions** (`instructions` array in config) | `core/src/butterfly-config.ts` |
+| **MCP integration** (stdio + SSE, lazy SDK loading) | `packages/tools/src/mcp.ts` |
+| **Plugin system** (local/npm, activate/deactivate) | `packages/tools/src/plugins.ts` |
+| **Rollback tool** (uses checkpoint before/after data) | `packages/tools/src/tools/rollback.ts` |
+
+### 13.2 High Priority (Next Up)
+
+| # | Feature | Rationale |
+|---|---|---|
+| H1 | **Multi-model provider support** — Anthropic-native adapter, Google Gemini adapter, Ollama/local adapter beyond the current OpenAI-compatible-only Vercel adapter | Opens Butterfly to local/offline use cases |
+| H2 | **Interactive permission prompts** — wire the existing `PermissionHook` to a real CLI prompt (y/n) for destructive tool calls | Interface exists; UX implementation missing |
+| H3 | **Streaming in CLI** — wire `completeStream()` + `onStreamEvent` to stream tokens to the terminal | Stream infrastructure exists; CLI wiring missing |
+| H4 | **Real LSP integration** — connect to a language server to make go-to-definition, diagnostics, and references actually work | LSP interface exists; implementation pending |
+
+### 13.3 Medium Priority
+
+| # | Feature | Rationale |
+|---|---|---|
+| M1 | **Conversation management** — delete, rename, search sessions; more CLI commands beyond `--list-sessions` | Sessions persist globally; management UX is basic |
+| M2 | **Rate limiting awareness** — track API rate limits and throttle proactively | Retry exists; proactive throttling doesn't |
+| M3 | **Advanced COE compressor** — the `Compressor` interface exists in `COEOptions`; implement LLM-based summarizer for old messages | Interface defined; implementation pending |
+
+### 13.4 Lower Priority (Post-MVP Polish)
+
+| # | Feature | Rationale |
+|---|---|---|
+| L1 | **Telemetry/analytics** — optional usage tracking (opt-in) | Standard in production tools |
+| L2 | **Background process persistence** — survive agent restarts | Current background processes are memory-only |
+| L3 | **LLM response caching** — semantic cache for repeated prompts | Cost optimization |
+| L4 | **Symlink protection** — SCE and glob/grep tools add cycle detection | Security hardening |
+| L5 | **Image read from disk** — `readTool` returns base64 images for vision models | Multimodal types exist; file reading doesn't produce images |
+
+### 13.5 Butterfly's Special Features
+
+| Feature | Description |
+|---|---|
+| **SCE (Smart Context Engine)** | Keyword-based context selection from the codebase. |
+| **COE (Context Optimization Engine)** | Three-pass optimization (dedupe, truncate, drop-oldest) with `Compressor` extension point. |
+| **Tiered Model Router** | Automatic escalation from cheap→strong models on failure. Configurable via `butterfly.json`. |
+| **ForgivingToolCallParser** | Multi-strategy parser (JSON, Hermes, LiquidAI, XML, YAML) for models without native tool calling. |
+| **Mode System** | Plan (read-only), Build (full access), Orchestrator (delegation-only). |
+| **Write-Protection** | Must `read` a file before mutating it. Prevents hallucinated edits. |
+| **Opencode-compatible config** | Copy-paste your `opencode.json` and it works. Butterfly extensions under `butterfly` key. |
+
+### 13.6 Opencode Feature Comparison
+
+| Feature | Opencode | Butterfly |
+|---|---|---|
+| MCP integration | ✅ | ✅ |
+| Plugin system | ✅ | ✅ |
+| Config system | ✅ (opencode.json) | ✅ (butterfly.json, compatible) |
+| Custom instructions | ✅ | ✅ |
+| Permission prompts | ✅ | ✅ (interactive y/n via readline) |
+| Streaming output | ✅ | ✅ (completeStream + onStreamEvent wired) |
+| Session management | ✅ | ✅ (global store, --resume, --list-sessions) |
+| Image/vision | ✅ | ✅ (multimodal types + adapter) |
+| Diff-based editing | ✅ | ✅ (diff_patch) |
+| Parallel tool execution | ✅ | ✅ |
+| Background tasks | ✅ | ✅ (background_bash) |
+| File checkpointing | ✅ | ✅ (rollback tool, mid-loop visibility) |
+| Multi-provider LLM | ✅ (10+) | ✅ (OpenAI-compatible, extensible) |
+| LSP integration | ✅ (Cline) | ✅ (StdioLSPClient, go-to-def/diagnostics/refs) |
+| Context engine | ❌ (basic file selection) | ✅ (SCE + COE) |
+| Model tier routing | ❌ | ✅ (ModelRouter) |

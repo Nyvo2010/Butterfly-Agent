@@ -1,11 +1,12 @@
-export type { LLMScript } from "./mock-llm"
-
-export { MockLLMClient, textResponse, toolCallResponse, zeroUsage } from "./mock-llm"
+export { MockLLMClient, textResponse, toolCallResponse } from "./mock-llm"
 export type {
   LLMClient,
+  LLMContentPart,
   LLMMessage,
   LLMRequest,
   LLMResponse,
+  LLMStream,
+  LLMStreamEvent,
   LLMToolSpec,
   LLMUsage,
   ToolCallParser,

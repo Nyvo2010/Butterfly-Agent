@@ -18,10 +18,9 @@
  *     pnpm exec tsx apps/cli/src/inspect.ts
  */
 
-import { existsSync } from "node:fs"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { join } from "node:path"
 
 import { AgentLoop, ModelRouter } from "@butterfly/agent"
 import { COE, GPTTokenizer, SCE } from "@butterfly/context"
@@ -46,18 +45,9 @@ import {
   ToolRegistry,
   writeTool,
 } from "@butterfly/tools"
+import { findWorkspaceRoot } from "./workspace-root.js"
 
 const DIV = "\n" + "=".repeat(79) + "\n"
-
-function findWorkspaceRoot(start: string = process.cwd()): string {
-  let dir = start
-  while (true) {
-    if (existsSync(join(dir, "pnpm-workspace.yaml"))) return dir
-    const parent = dirname(dir)
-    if (parent === dir) return start
-    dir = parent
-  }
-}
 
 async function section(title: string, body: () => Promise<void>) {
   process.stdout.write(`${DIV}  ${title}\n${DIV}`)

@@ -1,19 +1,40 @@
+import { homedir } from "node:os"
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { SessionState } from "./types"
 import type { SessionStore } from "./store"
 
-const SESSIONS_DIR = ".butterfly/sessions"
+function globalSessionsDir(): string {
+  return join(homedir(), ".butterfly", "sessions")
+}
 
+/**
+ * FileSystemSessionStore persists sessions as JSON files.
+ *
+ * When `root` is provided (project-local mode), sessions go to
+ * `<root>/.butterfly/sessions/<id>.json`.
+ *
+ * When `root` is omitted (global mode), sessions go to
+ * `~/.butterfly/sessions/<id>.json` — shared across all projects,
+ * matching Opencode's convention.
+ */
 export class FileSystemSessionStore implements SessionStore {
-  constructor(private readonly root: string) {}
+  private readonly root: string | null
+
+  constructor(root?: string) {
+    this.root = root ?? null
+  }
+
+  private sessionsDir(): string {
+    return this.root ? join(this.root, ".butterfly", "sessions") : globalSessionsDir()
+  }
 
   private sessionPath(id: string): string {
-    return join(this.root, SESSIONS_DIR, `${id}.json`)
+    return join(this.sessionsDir(), `${id}.json`)
   }
 
   private async ensureDir(): Promise<void> {
-    await mkdir(join(this.root, SESSIONS_DIR), { recursive: true })
+    await mkdir(this.sessionsDir(), { recursive: true })
   }
 
   async load(id: string): Promise<SessionState | null> {
@@ -37,7 +58,7 @@ export class FileSystemSessionStore implements SessionStore {
   async list(): Promise<Array<{ id: string; updatedAt: string }>> {
     try {
       await this.ensureDir()
-      const entries = await readdir(join(this.root, SESSIONS_DIR))
+      const entries = await readdir(this.sessionsDir())
       const results: Array<{ id: string; updatedAt: string }> = []
       for (const entry of entries) {
         if (!entry.endsWith(".json")) continue

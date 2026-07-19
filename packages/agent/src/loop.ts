@@ -1,13 +1,29 @@
 import type { COE, SCE, SCEOptions } from "@butterfly/context"
 import { log } from "@butterfly/core"
-import type { LLMClient, LLMMessage, LLMResponse, LLMToolSpec, ToolCallParser } from "@butterfly/llm"
+import type {
+  LLMClient,
+  LLMMessage,
+  LLMResponse,
+  LLMStreamEvent,
+  LLMToolSpec,
+  ToolCallParser,
+} from "@butterfly/llm"
 import type { SessionState, SessionStore, Tier, ToolCallRecord } from "@butterfly/session"
 import type { Tool, ToolRegistry } from "@butterfly/tools"
-import { access } from "node:fs/promises"
+import { access, readFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import { kindsForMode } from "./modes"
 import { buildSystemPrompt } from "./prompt"
 import type { ModelResolution, ModelRouter } from "./router"
+
+/**
+ * Permission hook called before executing a tool. Return false to deny execution.
+ * The tool name and input are provided for user-interface decisions.
+ */
+export type PermissionHook = (
+  toolName: string,
+  input: Record<string, unknown>,
+) => Promise<{ allowed: boolean; reason?: string }>
 
 export interface AgentLoopDeps {
   llm: LLMClient
@@ -17,6 +33,12 @@ export interface AgentLoopDeps {
   registry: ToolRegistry
   store: SessionStore
   parser?: ToolCallParser
+  /** Optional permission hook. Called before write/exec/delegate tools. */
+  permissionHook?: PermissionHook
+  /** Optional streaming callback for live UI updates. */
+  onStreamEvent?: (event: LLMStreamEvent) => void
+  /** Optional callback after each iteration with current session state. */
+  onIteration?: (session: SessionState, iteration: number) => void
 }
 
 export interface RunRequest {
@@ -126,12 +148,26 @@ export class AgentLoop {
       }))
       let response: LLMResponse
       try {
-        response = await this.deps.llm.complete({
-          model: lastResolution.model,
-          system: prompt.system,
-          messages: llmMessages,
-          tools: llmTools.length > 0 ? llmTools : undefined,
-        })
+        // Use streaming when both onStreamEvent and completeStream are available.
+        if (this.deps.onStreamEvent && this.deps.llm.completeStream) {
+          response = await completeWithStream(
+            this.deps.llm,
+            {
+              model: lastResolution.model,
+              system: prompt.system,
+              messages: llmMessages,
+              tools: llmTools.length > 0 ? llmTools : undefined,
+            },
+            this.deps.onStreamEvent,
+          )
+        } else {
+          response = await this.deps.llm.complete({
+            model: lastResolution.model,
+            system: prompt.system,
+            messages: llmMessages,
+            tools: llmTools.length > 0 ? llmTools : undefined,
+          })
+        }
       } catch (err) {
         log("error", "agent.step.llm_error", { ...stepLog, error: (err as Error).message })
         throw err
@@ -168,7 +204,7 @@ export class AgentLoop {
         }
       }
 
-      // ── Step 7 + 8: Execute tool calls sequentially, append results ────
+      // ── Step 7 + 8: Execute tool calls in parallel, append results ────
       let stepHadFailure = false
       const messages: SessionState["messages"] = [...session.messages]
       const toolCalls: ToolCallRecord[] = [...session.toolCalls]
@@ -176,13 +212,7 @@ export class AgentLoop {
       const readFiles: string[] = [...(session.readFiles ?? [])]
 
       // Store the assistant's tool-call decision as a message so the LLM
-      // sees its own decision-making in subsequent iterations.  Without this
-      // the conversation alternates user→tool-result→user→tool-result which
-      // confuses models into calling tools indefinitely.
-      //
-      // Note: using a natural-language prefix instead of bracket-syntax to
-      // avoid confusing Mistral's tool-call parser (some Mistral models
-      // misinterpret [Tool ...] patterns as tool invocations).
+      // sees its own decision-making in subsequent iterations.
       const toolCallNames = response.calls.map((c) => c.name).join(", ")
       messages.push({
         id: `msg-assistant-step-${iteration}`,
@@ -191,73 +221,167 @@ export class AgentLoop {
         timestamp: new Date().toISOString(),
       })
 
-      for (const call of response.calls) {
-        const tool = this.deps.registry.get(call.name)
-        if (!tool) {
-          log("warn", "agent.step.tool_unknown", { ...stepLog, name: call.name })
-          stepHadFailure = true
-          continue
-        }
-        const startedAt = new Date().toISOString()
-        log("info", "agent.step.tool_start", {
-          ...stepLog,
-          name: call.name,
-          args: call.input,
-          startedAt,
-        })
-        let result: { kind: "ok"; output: unknown } | { kind: "err"; message: string }
-        const path = String((call.input as { path?: string }).path ?? "")
-        if ((tool.name === "write" || tool.name === "patch" || tool.name === "delete") && path && !readFiles.includes(path)) {
-          const resolved = path.startsWith("/") ? path : resolve(req.cwd, path)
-          try {
-            await access(resolved)
-            result = { kind: "err", message: `File not read yet. Use read tool first: ${path}` }
-          } catch {
+      // Execute all tool calls in parallel. Each call is independent;
+      // write-protection checks run first, then all tools fire concurrently.
+      const callResults = await Promise.all(
+        response.calls.map(async (call) => {
+          const tool = this.deps.registry.get(call.name)
+          if (!tool) {
+            log("warn", "agent.step.tool_unknown", { ...stepLog, name: call.name })
+            return { call, tool: null, error: true, result: undefined as unknown }
+          }
+
+          // Permission check for destructive tools.
+          if (
+            this.deps.permissionHook &&
+            (tool.kind === "write" || tool.kind === "exec" || tool.kind === "delegate")
+          ) {
+            const perm = await this.deps.permissionHook(
+              tool.name,
+              call.input as Record<string, unknown>,
+            )
+            if (!perm.allowed) {
+              log("info", "agent.step.permission_denied", {
+                ...stepLog,
+                name: call.name,
+                reason: perm.reason,
+              })
+              return {
+                call,
+                tool,
+                error: true,
+                result: {
+                  kind: "err" as const,
+                  message: perm.reason ?? `Permission denied for ${tool.name}`,
+                },
+              }
+            }
+          }
+
+          const startedAt = new Date().toISOString()
+          log("info", "agent.step.tool_start", {
+            ...stepLog,
+            name: call.name,
+            args: call.input,
+            startedAt,
+          })
+
+          const path = String((call.input as { path?: string }).path ?? "")
+
+          // Checkpoint: save file content before mutation for rollback.
+          let beforeContent: string | undefined
+          if (toolMatchesFileMutation(tool) && path) {
+            const resolved = path.startsWith("/") ? path : resolve(req.cwd, path)
+            try {
+              beforeContent = await readFile(resolved, "utf8")
+            } catch {
+              // File doesn't exist yet — no checkpoint needed.
+            }
+          }
+
+          // Write-protection: must read a file before mutating it.
+          let result: { kind: "ok"; output: unknown } | { kind: "err"; message: string }
+          if (
+            (tool.name === "write" || tool.name === "patch" || tool.name === "delete" || tool.name === "diff_patch") &&
+            path &&
+            !readFiles.includes(path)
+          ) {
+            const resolved = path.startsWith("/") ? path : resolve(req.cwd, path)
+            try {
+              await access(resolved)
+              result = { kind: "err", message: `File not read yet. Use read tool first: ${path}` }
+            } catch {
+              result = await tool.execute(call.input as Record<string, unknown>, { cwd: req.cwd })
+            }
+          } else {
             result = await tool.execute(call.input as Record<string, unknown>, { cwd: req.cwd })
           }
-        } else {
-          result = await tool.execute(call.input as Record<string, unknown>, { cwd: req.cwd })
+
+          // Track read files.
+          if (tool.name === "read" && result.kind === "ok" && path) {
+            return {
+              call,
+              tool,
+              error: false,
+              result,
+              startedAt,
+              readPath: path,
+              beforeContent: undefined,
+            }
+          }
+
+          return { call, tool, error: result.kind === "err", result, startedAt, beforeContent, readPath: undefined as string | undefined }
+        }),
+      )
+
+      // Collect results in order.
+      for (const cr of callResults) {
+        const { call, tool, error, result: res, startedAt, beforeContent, readPath } = cr
+
+        if (!tool || !res) {
+          stepHadFailure = stepHadFailure || error
+          continue
         }
-        if (tool.name === "read" && result.kind === "ok" && path && !readFiles.includes(path)) {
-          readFiles.push(path)
-        }
+
         const finishedAt = new Date().toISOString()
         log("info", "agent.step.tool_result", {
           ...stepLog,
           name: call.name,
-          kind: result.kind,
-          outputBytes: result.kind === "ok" ? JSON.stringify(result.output).length : 0,
-          message: result.kind === "err" ? result.message : undefined,
+          kind: res.kind,
+          outputBytes: res.kind === "ok" ? JSON.stringify(res.output).length : 0,
+          message: res.kind === "err" ? res.message : undefined,
           finishedAt,
         })
-        if (result.kind === "err") stepHadFailure = true
+        if (res.kind === "err") stepHadFailure = true
+
+        if (readPath && !readFiles.includes(readPath)) {
+          readFiles.push(readPath)
+        }
 
         const tcId = `tc-${call.id}-${iteration}`
         toolCalls.push({
           id: tcId,
           name: call.name,
           input: call.input,
-          result: result.kind === "ok" ? result.output : undefined,
-          error: result.kind === "err" ? result.message : undefined,
-          startedAt,
+          result: res.kind === "ok" ? res.output : undefined,
+          error: res.kind === "err" ? res.message : undefined,
+          startedAt: startedAt ?? finishedAt,
           finishedAt,
         })
+
         if (toolMatchesFileMutation(tool)) {
-          fileChanges.push({
-            path: String((call.input as { path?: string }).path ?? "?"),
-            kind:
-              tool.name === "delete"
-                ? "delete"
+          const fPath = String((call.input as { path?: string }).path ?? "?")
+          const kind =
+            tool.name === "delete"
+              ? "delete"
+              : tool.name === "diff_patch"
+                ? "patch"
                 : tool.kind === "write" || tool.name === "write"
                   ? "write"
-                  : "patch",
+                  : "patch"
+          // Read after-content for checkpoint.
+          let afterContent: string | undefined
+          if (res.kind === "ok" && tool.name !== "delete" && fPath !== "?") {
+            const resolved = fPath.startsWith("/") ? fPath : resolve(req.cwd, fPath)
+            try {
+              afterContent = await readFile(resolved, "utf8")
+            } catch {
+              // File may have been created — that's fine.
+            }
+          }
+          fileChanges.push({
+            path: fPath,
+            kind,
+            before: beforeContent,
+            after: afterContent,
             at: finishedAt,
           })
         }
+
         messages.push({
           id: `msg-${call.id}-${iteration}`,
           role: "tool",
-          content: toolMessageContent(result),
+          content: toolMessageContent(res),
           toolCallId: call.id,
           timestamp: finishedAt,
         })
@@ -272,6 +396,8 @@ export class AgentLoop {
         updatedAt: new Date().toISOString(),
       }
       await this.deps.store.save(session)
+      // Notify listeners so rollback tool and other consumers see live session state.
+      this.deps.onIteration?.(session, iteration)
       log("info", "agent.step.iteration_appended", {
         ...stepLog,
         newMessageCount: session.messages.length,
@@ -303,6 +429,55 @@ export class AgentLoop {
   }
 }
 
+/**
+ * Consume a streamed completion and build a full LLMResponse.
+ * Calls onStreamEvent for each chunk so the CLI can show live output.
+ */
+async function completeWithStream(
+  llm: LLMClient,
+  req: { model: string; system: string; messages: LLMMessage[]; tools?: LLMToolSpec[] },
+  onEvent: (event: LLMStreamEvent) => void,
+): Promise<LLMResponse> {
+  const stream = await llm.completeStream!(req)
+  let text = ""
+  const toolCalls = new Map<string, { id: string; name: string; input: unknown }>()
+  let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+
+  for await (const event of stream) {
+    onEvent(event)
+    switch (event.kind) {
+      case "text_delta":
+        text += event.text
+        break
+      case "tool_call_delta": {
+        const existing = toolCalls.get(event.id) ?? { id: event.id, name: "", input: undefined }
+        if (event.name) existing.name = event.name
+        // Vercel SDK emits the latest full args object in each tool-call delta.
+        // Use the last value (not concatenation) to avoid stringifying objects.
+        if (event.input !== undefined) existing.input = event.input
+        toolCalls.set(event.id, existing)
+        break
+      }
+      case "done":
+        usage = event.usage
+        break
+    }
+  }
+
+  if (toolCalls.size > 0) {
+    return {
+      kind: "tool_calls",
+      calls: Array.from(toolCalls.values()).map((tc) => ({
+        id: tc.id,
+        name: tc.name,
+        input: tc.input as Record<string, unknown> ?? {},
+      })),
+      usage,
+    }
+  }
+  return { kind: "text", text, usage }
+}
+
 function escalationCount(tier: Tier): number {
   // depth is encoded in the tier itself for MVP simplicity (no sticky-history field needed).
   return tier === "trivial" ? 0 : tier === "standard" ? 1 : tier === "complex" ? 2 : 3
@@ -319,7 +494,7 @@ function toolMessageContent(
 }
 
 function toolMatchesFileMutation(tool: Tool): boolean {
-  return tool.name === "write" || tool.name === "patch" || tool.name === "delete"
+  return tool.name === "write" || tool.name === "patch" || tool.name === "delete" || tool.name === "diff_patch"
 }
 
 function appendAssistantText(session: SessionState, text: string): SessionState {
@@ -337,6 +512,3 @@ function appendAssistantText(session: SessionState, text: string): SessionState 
     updatedAt: new Date().toISOString(),
   }
 }
-
-// each subagent must satisfy the same loop, so no separate type lives here.
-export type { ModelResolution }
