@@ -1,0 +1,25 @@
+{
+  "name": "@butterfly/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run apps/cli",
+    "start": "tsx src/index.ts",
+    "demo": "tsx src/demo.ts"
+  },
+  "dependencies": {
+    "@butterfly/agent": "workspace:*",
+    "@butterfly/context": "workspace:*",
+    "@butterfly/core": "workspace:*",
+    "@butterfly/llm": "workspace:*",
+    "@butterfly/session": "workspace:*",
+    "@butterfly/tools": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.0"
+  }
+}

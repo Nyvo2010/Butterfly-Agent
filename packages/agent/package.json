@@ -1,0 +1,19 @@
+{
+  "name": "@butterfly/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run packages/agent"
+  },
+  "dependencies": {
+    "@butterfly/context": "workspace:*",
+    "@butterfly/core": "workspace:*",
+    "@butterfly/llm": "workspace:*",
+    "@butterfly/session": "workspace:*",
+    "@butterfly/tools": "workspace:*"
+  }
+}

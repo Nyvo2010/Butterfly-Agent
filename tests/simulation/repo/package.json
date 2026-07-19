@@ -1,0 +1,8 @@
+{
+  "name": "simulation-repo",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "echo 'No tests configured yet' && exit 0"
+  }
+}

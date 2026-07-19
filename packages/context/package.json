@@ -1,0 +1,17 @@
+{
+  "name": "@butterfly/context",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run packages/context"
+  },
+  "dependencies": {
+    "@butterfly/core": "workspace:*",
+    "@butterfly/session": "workspace:*",
+    "gpt-tokenizer": "^1.0.0"
+  }
+}

@@ -8,6 +8,7 @@ Your output directly affects a future open-source system. That means:
 - correctness matters more than speed
 - structure matters more than cleverness
 - maintainability matters more than convenience
+- clarity and modularity are important for future development
 
 When user instructions conflict with repository health, you must push back clearly and explain the risk.
 
@@ -135,126 +136,6 @@ If a decision hurts future contributors:
 
 ---
 
-# Repository Workflow Rules (STRICT)
-
-These rules MUST be followed for all code changes.
-
-## 1. Branching Strategy
-
-Use:
-- `main` → stable, deployable
-- `feature/*` → all work happens here
-
-Rules:
-- never commit directly to main
-- never merge without passing CI
-- keep branches small and scoped
-
-If unsure:
-
-> ask before merging anything into main
-
----
-
-## 2. Pull Request Discipline
-
-Every PR must:
-- be scoped to one feature or fix
-- include clear description of changes
-- avoid unrelated refactors
-- pass all tests and CI checks
-
-If a PR is large:
-→ split it before review
-
----
-
-## 3. Testing Strategy (Required, Not Optional)
-
-You MUST use the project’s testing layers:
-
-### Required layers:
-
-- Unit tests → pure logic (SCE, COE, routing, permissions)
-- Integration tests → agent loop + tool execution
-- Trace tests → full execution replay (golden sessions)
-
-Rules:
-- no feature is complete without tests
-- mock LLMs for all CI runs
-- never rely on real external APIs in tests
-
-If testing is missing:
-→ do NOT treat implementation as finished
-
----
-
-## 4. Dev Workflow Strategy
-
-Always assume contributors will run:
-
-```bash
-pnpm install
-pnpm dev
-pnpm test
-pnpm start
-```
-
-If this is not true:
-→ the repo is broken
-
-Every feature must be:
-- runnable locally
-- testable without external services
-- reproducible from clean clone
-
----
-
-## 5. CI Requirement
-
-All changes must pass:
-- lint
-- typecheck
-- unit tests
-- integration tests (mocked LLM)
-
-No exceptions.
-
-If CI would fail due to missing setup:
-→ fix CI or block the PR
-
----
-
-## Communication Rule
-
-Keep the user informed:
-- what you are doing
-- what you changed
-- why it matters
-- what comes next
-
-But avoid noise:
-- no unnecessary verbosity
-- no redundant summaries
-
----
-
-## Pushback Requirement
-
-You MUST push back when:
-- user requests harmful architecture
-- introduces unnecessary complexity
-- violates modular boundaries
-- breaks OSS maintainability
-- conflicts with MVP scope
-
-Pushback must include:
-- what is wrong
-- why it is risky
-- a better alternative
-
----
-
 # Behavioral Guidelines
 
 ## 1. Think Before Coding
@@ -322,4 +203,4 @@ So your goal is not just to “make it work”.
 
 Your goal is:
 
-> make it understandable, testable, and evolvable by strangers
+> make it understandable, testable, and as modular as possible, so that future developers can easily maintain and extend it.
