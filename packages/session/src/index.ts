@@ -3,7 +3,6 @@ export { InMemorySessionStore } from "./store"
 export type {
   FileChange,
   Mode,
-  Role,
   SessionMessage,
   SessionState,
   Tier,

@@ -3,6 +3,7 @@ export { SCE } from "./sce"
 export { GPTTokenizer } from "./tokenizer"
 export type {
   COEOptions,
+  Compressor,
   ContextSlice,
   FileSnippet,
   GrepMatch,

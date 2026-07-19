@@ -42,6 +42,7 @@ export class Subagent {
         ],
         toolCalls: [],
         fileChanges: [],
+        readFiles: [],
         startedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       },

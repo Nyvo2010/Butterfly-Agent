@@ -1,7 +1,7 @@
 import { AgentLoop, ModelRouter } from "@butterfly/agent"
 import { COE, GPTTokenizer, SCE } from "@butterfly/context"
 import { loadConfig, log } from "@butterfly/core"
-import { MockLLMClient, textResponse, toolCallResponse, VercelAILLMClient } from "@butterfly/llm"
+import { ForgivingToolCallParser, MockLLMClient, textResponse, toolCallResponse, VercelAILLMClient } from "@butterfly/llm"
 import { createSession, InMemorySessionStore } from "@butterfly/session"
 import {
   bashTool,
@@ -65,6 +65,7 @@ export async function runAgent(opts: RunOptions): Promise<RunOutput> {
     router: new ModelRouter(),
     registry,
     store,
+    parser: new ForgivingToolCallParser(),
   })
 
   const session = createSession("cli-session", "build")

@@ -1,8 +1,10 @@
 import type { COE, SCE, SCEOptions } from "@butterfly/context"
 import { log } from "@butterfly/core"
-import type { LLMClient, LLMMessage, LLMResponse, LLMToolSpec } from "@butterfly/llm"
+import type { LLMClient, LLMMessage, LLMResponse, LLMToolSpec, ToolCallParser } from "@butterfly/llm"
 import type { SessionState, SessionStore, Tier, ToolCallRecord } from "@butterfly/session"
 import type { Tool, ToolRegistry } from "@butterfly/tools"
+import { access } from "node:fs/promises"
+import { resolve } from "node:path"
 import { kindsForMode } from "./modes"
 import { buildSystemPrompt } from "./prompt"
 import type { ModelResolution, ModelRouter } from "./router"
@@ -14,6 +16,7 @@ export interface AgentLoopDeps {
   router: ModelRouter
   registry: ToolRegistry
   store: SessionStore
+  parser?: ToolCallParser
 }
 
 export interface RunRequest {
@@ -84,7 +87,7 @@ export class AgentLoop {
       })
 
       // ── Step 3: Run COE ────────────────────────────────────────────────
-      const optimized = this.deps.coe.optimize(session, { maxContextTokens: 8_000 })
+      const optimized = await this.deps.coe.optimize(session, { maxContextTokens: 8_000 })
       session = { ...optimized, updatedAt: new Date().toISOString() }
       log("info", "agent.step.coe_complete", {
         ...stepLog,
@@ -141,6 +144,15 @@ export class AgentLoop {
       })
 
       // ── Step 6: Parse response ─────────────────────────────────────────
+
+      // ── Step 6b: Try to parse text response as tool calls ──────────────────
+      if (response.kind === "text" && this.deps.parser) {
+        const parsed = this.deps.parser.parse(response.text)
+        if (parsed && parsed.length > 0) {
+          response = { kind: "tool_calls", calls: parsed, usage: response.usage }
+        }
+      }
+
       if (response.kind === "text") {
         log("info", "agent.stop.no_tool_calls", {
           ...stepLog,
@@ -161,6 +173,7 @@ export class AgentLoop {
       const messages: SessionState["messages"] = [...session.messages]
       const toolCalls: ToolCallRecord[] = [...session.toolCalls]
       const fileChanges: SessionState["fileChanges"] = [...session.fileChanges]
+      const readFiles: string[] = [...(session.readFiles ?? [])]
 
       // Store the assistant's tool-call decision as a message so the LLM
       // sees its own decision-making in subsequent iterations.  Without this
@@ -192,7 +205,22 @@ export class AgentLoop {
           args: call.input,
           startedAt,
         })
-        const result = await tool.execute(call.input as Record<string, unknown>, { cwd: req.cwd })
+        let result: { kind: "ok"; output: unknown } | { kind: "err"; message: string }
+        const path = String((call.input as { path?: string }).path ?? "")
+        if ((tool.name === "write" || tool.name === "patch") && path && !readFiles.includes(path)) {
+          const resolved = path.startsWith("/") ? path : resolve(req.cwd, path)
+          try {
+            await access(resolved)
+            result = { kind: "err", message: `File not read yet. Use read tool first: ${path}` }
+          } catch {
+            result = await tool.execute(call.input as Record<string, unknown>, { cwd: req.cwd })
+          }
+        } else {
+          result = await tool.execute(call.input as Record<string, unknown>, { cwd: req.cwd })
+        }
+        if (tool.name === "read" && result.kind === "ok" && path && !readFiles.includes(path)) {
+          readFiles.push(path)
+        }
         const finishedAt = new Date().toISOString()
         log("info", "agent.step.tool_result", {
           ...stepLog,
@@ -235,6 +263,7 @@ export class AgentLoop {
         messages,
         toolCalls,
         fileChanges,
+        readFiles,
         updatedAt: new Date().toISOString(),
       }
       await this.deps.store.save(session)

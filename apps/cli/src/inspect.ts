@@ -28,6 +28,7 @@ import { COE, GPTTokenizer, SCE } from "@butterfly/context"
 import { loadDotEnv } from "@butterfly/core"
 import {
   type LLMClient,
+  ForgivingToolCallParser,
   MockLLMClient,
   textResponse,
   toolCallResponse,
@@ -172,7 +173,7 @@ async function inspectCOE() {
         `[COE.input]  messages=${state.messages.length}, toolCalls=${state.toolCalls.length}, totalTokens=${beforeTokens}`,
       )
 
-      const optimized = coe.optimize(state, {
+      const optimized = await coe.optimize(state, {
         maxContextTokens: 4_000,
         toolMessageMaxTokens: 1_500,
       })
@@ -331,7 +332,7 @@ async function inspectLoop(workspace: string, useReal: boolean) {
       ])
     }
 
-    const loop = new AgentLoop({ llm, sce, coe, router, registry, store })
+    const loop = new AgentLoop({ llm, sce, coe, router, registry, store, parser: new ForgivingToolCallParser() })
     const t0 = Date.now()
     const result = await loop.run({
       session: createSession("inspect-loop-session", "build"),

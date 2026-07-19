@@ -7,7 +7,7 @@ import { join } from "node:path"
 import { AgentLoop, ModelRouter } from "@butterfly/agent"
 import { COE, GPTTokenizer, SCE } from "@butterfly/context"
 import { log } from "@butterfly/core"
-import { MockLLMClient, textResponse, toolCallResponse } from "@butterfly/llm"
+import { ForgivingToolCallParser, MockLLMClient, textResponse, toolCallResponse } from "@butterfly/llm"
 import { createSession, InMemorySessionStore } from "@butterfly/session"
 import { globTool, readTool, ToolRegistry, writeTool } from "@butterfly/tools"
 
@@ -45,7 +45,7 @@ async function main() {
     textResponse("Done."),
   ])
 
-  const loop = new AgentLoop({ llm: mock, sce, coe, router, registry, store })
+  const loop = new AgentLoop({ llm: mock, sce, coe, router, registry, store, parser: new ForgivingToolCallParser() })
   const session = createSession("demo-session", "build")
   const result = await loop.run({
     session,

@@ -6,9 +6,10 @@ export type {
   LLMMessage,
   LLMRequest,
   LLMResponse,
-  LLMRole,
   LLMToolSpec,
   LLMUsage,
+  ToolCallParser,
 } from "./types"
+export { ForgivingToolCallParser } from "./parser"
 export type { VercelAILLMClientOptions } from "./vercel-adapter"
 export { VercelAILLMClient } from "./vercel-adapter"

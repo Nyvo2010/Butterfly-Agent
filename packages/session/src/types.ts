@@ -38,6 +38,7 @@ export interface SessionState {
   messages: SessionMessage[]
   toolCalls: ToolCallRecord[]
   fileChanges: FileChange[]
+  readFiles: string[]
   startedAt: string
   updatedAt: string
 }
@@ -51,6 +52,7 @@ export function createSession(id: string, mode: Mode, tier: Tier = "standard"): 
     messages: [],
     toolCalls: [],
     fileChanges: [],
+    readFiles: [],
     startedAt: now,
     updatedAt: now,
   }

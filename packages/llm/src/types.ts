@@ -35,6 +35,10 @@ export type LLMResponse =
       usage: LLMUsage
     }
 
+export interface ToolCallParser {
+  parse(raw: string): Array<{ id: string; name: string; input: unknown }> | null
+}
+
 export interface LLMClient {
   complete(req: LLMRequest): Promise<LLMResponse>
 }
