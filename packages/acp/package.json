@@ -1,0 +1,27 @@
+{
+  "name": "@butterfly/acp",
+  "version": "0.1.0",
+  "description": "Butterfly Agent — ACP (Agent Client Protocol) server. Clean agent/client separation.",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@butterfly/agent": "workspace:*",
+    "@butterfly/context": "workspace:*",
+    "@butterfly/core": "workspace:*",
+    "@butterfly/llm": "workspace:*",
+    "@butterfly/session": "workspace:*",
+    "@butterfly/tools": "workspace:*"
+  },
+  "devDependencies": {
+    "@agentclientprotocol/sdk": "^0.4.9",
+    "@types/node": "^22",
+    "tsx": "^4",
+    "typescript": "~5.7.3"
+  }
+}

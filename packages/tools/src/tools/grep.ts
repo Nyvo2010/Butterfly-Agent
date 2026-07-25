@@ -1,8 +1,10 @@
-import { readdir, readFile } from "node:fs/promises"
-import { isAbsolute, join, relative, resolve, sep } from "node:path"
+import { readFile, stat } from "node:fs/promises"
+import { isAbsolute, relative, resolve, sep } from "node:path"
 import type { Tool } from "../types"
+import { isPathInWorkspace } from "../types"
+import { DEFAULT_SKIP_DIRS, walk } from "./walk"
 
-const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".turbo", ".next"])
+const MAX_GREP_FILE_BYTES = 1024 * 1024
 
 export const grepTool: Tool<{ matches: Array<{ file: string; line: number; content: string }> }> = {
   name: "grep",
@@ -25,16 +27,37 @@ export const grepTool: Tool<{ matches: Array<{ file: string; line: number; conte
     const maxResults = Number(input.maxResults ?? 50)
     if (!query) return { kind: "err", message: "query is required" }
     const base = isAbsolute(basePath) ? basePath : resolve(ctx.cwd, basePath)
+    // Enforce workspace boundary.
+    if (ctx.workspaceRoots) {
+      const isWithin = await isPathInWorkspace(base, ctx.workspaceRoots)
+      if (!isWithin) {
+        return { kind: "err", message: `access denied: ${basePath} is outside the workspace` }
+      }
+    }
     let re: RegExp
     try {
       re = new RegExp(query, "gm")
-    } catch (err) {
-      return { kind: "err", message: `invalid regex: ${(err as Error).message}` }
+    } catch (_err) {
+      return { kind: "err", message: `invalid regex: ${(_err as Error).message}` }
+    }
+    // ReDoS guard: reject patterns likely to cause catastrophic backtracking.
+    // Source length cap prevents pathological regex. Nested quantifier check
+    // catches patterns like (a+)+ or (a|aa)+ that backtrack exponentially.
+    if (re.source.length > 500 || /\)[*+{]/.test(re.source) || /\+[*+]/.test(re.source)) {
+      return { kind: "err", message: "regex pattern too complex; simplify or narrow the search" }
     }
     const matches: Array<{ file: string; line: number; content: string }> = []
-    const files = await walk(base)
+    const skipDirs = new Set([...DEFAULT_SKIP_DIRS, ...(ctx.skipDirs ?? [])])
+    const files = await walk(base, skipDirs)
     for (const file of files) {
       if (matches.length >= maxResults) break
+      let st: Awaited<ReturnType<typeof stat>> | undefined
+      try {
+        st = await stat(file)
+      } catch {
+        continue
+      }
+      if (st.size > MAX_GREP_FILE_BYTES) continue
       let content: string
       try {
         content = await readFile(file, "utf8")
@@ -43,32 +66,17 @@ export const grepTool: Tool<{ matches: Array<{ file: string; line: number; conte
       }
       const lines = content.split("\n")
       for (let i = 0; i < lines.length && matches.length < maxResults; i++) {
-        if (re.test(lines[i])) {
+        const line = lines[i]
+        if (re.test(line)) {
           matches.push({
             file: relative(base, file).split(sep).join("/"),
             line: i + 1,
-            content: lines[i],
+            content: line,
           })
-          re.lastIndex = 0
         }
+        re.lastIndex = 0
       }
     }
     return { kind: "ok", output: { matches } }
   },
-}
-
-async function walk(dir: string): Promise<string[]> {
-  const out: string[] = []
-  try {
-    const entries = await readdir(dir, { withFileTypes: true })
-    for (const e of entries) {
-      if (SKIP_DIRS.has(e.name)) continue
-      const full = join(dir, e.name)
-      if (e.isDirectory()) out.push(...(await walk(full)))
-      else if (e.isFile()) out.push(full)
-    }
-  } catch {
-    return out
-  }
-  return out
 }

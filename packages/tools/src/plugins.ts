@@ -13,12 +13,12 @@
  *   export function deactivate?(): Promise<void>
  */
 
-import type { Tool } from "./types"
-import type { ToolRegistry } from "./registry"
-import type { ButterflyPluginConfig } from "@butterfly/core"
-import { join } from "node:path"
 import { existsSync } from "node:fs"
+import { join } from "node:path"
+import type { ButterflyPluginConfig } from "@butterfly/core"
 import { log } from "@butterfly/core"
+import type { ToolRegistry } from "./registry"
+import type { Tool } from "./types"
 
 // ─── Plugin Context ────────────────────────────────────────────────────────────
 
@@ -30,7 +30,11 @@ export interface PluginContext {
   /** The plugin's configuration options from butterfly.json. */
   options: Record<string, unknown>
   /** Logger scoped to this plugin. */
-  log: (level: "debug" | "info" | "warn" | "error", message: string, context?: Record<string, unknown>) => void
+  log: (
+    level: "debug" | "info" | "warn" | "error",
+    message: string,
+    context?: Record<string, unknown>,
+  ) => void
 }
 
 // ─── Plugin Instance ───────────────────────────────────────────────────────────
@@ -98,9 +102,7 @@ export async function activatePlugin(
         registry.register(tool)
       },
       unregisterTool(name: string) {
-        // Tools can't be removed from ToolRegistry in current API.
-        // This is a no-op for now. Plugins should clean up in deactivate().
-        void name
+        registry.remove(name)
       },
       options: config.options ?? {},
       log: (level, message, context) => {
@@ -140,13 +142,12 @@ export async function activateAllPlugins(
  * Deactivate all loaded plugins. Call on shutdown.
  */
 export async function deactivateAllPlugins(): Promise<void> {
-  for (const [pluginName, instance] of loadedPlugins) {
+  for (const [, instance] of loadedPlugins) {
     try {
       await instance.deactivate?.()
     } catch {
       // Best-effort deactivation
     }
-    void pluginName
   }
   loadedPlugins.clear()
 }

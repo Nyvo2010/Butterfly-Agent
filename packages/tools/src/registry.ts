@@ -31,6 +31,10 @@ export class ToolRegistry {
     return this.list().filter((t) => set.has(t.kind))
   }
 
+  remove(name: string): boolean {
+    return this.tools.delete(name)
+  }
+
   size(): number {
     return this.tools.size
   }

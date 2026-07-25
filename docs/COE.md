@@ -32,8 +32,7 @@ COE is **pure** (no I/O, no LLM calls — only tokenizer math and array splicing
 | `packages/session/src/types.ts` | `SessionState`, `SessionMessage`, `ToolCallRecord` — the data COE mutates (on a clone). |
 
 Loop integration: `packages/agent/src/loop.ts` (Step 3, hardcoded `maxContextTokens: 8_000`).
-CLI wire-up: `apps/cli/src/run.ts` constructs `new COE(new GPTTokenizer())`.
-Spec: `MVP-SCOPE.md` §6 (mirrored one-for-one).
+Factory wire-up: `packages/agent/src/factory.ts` constructs `new COE(new GPTTokenizer())`.
 
 ---
 

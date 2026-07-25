@@ -1,6 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises"
 import { isAbsolute, resolve } from "node:path"
 import type { Tool } from "../types"
+import { isPathInWorkspace } from "../types"
 
 export const patchTool: Tool<{ patched: boolean }> = {
   name: "patch",
@@ -24,6 +25,9 @@ export const patchTool: Tool<{ patched: boolean }> = {
     if (!path) return { kind: "err", message: "path is required" }
     if (!oldText) return { kind: "err", message: "oldText is required" }
     const abs = isAbsolute(path) ? path : resolve(ctx.cwd, path)
+    if (ctx.workspaceRoots && !(await isPathInWorkspace(abs, ctx.workspaceRoots))) {
+      return { kind: "err", message: `access denied: ${path} is outside the workspace` }
+    }
     try {
       const before = await readFile(abs, "utf8")
       const occurrences = before.split(oldText).length - 1
@@ -34,7 +38,10 @@ export const patchTool: Tool<{ patched: boolean }> = {
           message: `oldText matches ${occurrences} times in ${path}; must be unique`,
         }
       }
-      const after = before.replace(oldText, newText)
+      const after = before.replace(
+        new RegExp(oldText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"),
+        newText.replace(/\$/g, "$$$"),
+      )
       await writeFile(abs, after, "utf8")
       return { kind: "ok", output: { patched: true } }
     } catch (err) {

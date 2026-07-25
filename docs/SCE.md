@@ -32,8 +32,7 @@ SCE is **read-only** against the file system, **stateless** across calls, and pr
 
 Loop integration: `packages/agent/src/loop.ts` (calls `sce.select` exactly once per iteration).
 Prompt consumption: `packages/agent/src/prompt.ts` (renders `slice.grepMatches` / `slice.fileSnippets`).
-CLI wire-up: `apps/cli/src/run.ts` constructs `new SCE(new GPTTokenizer())` and passes it into the `AgentLoop`.
-Spec: `MVP-SCOPE.md` §5 (the page that the implementation mirrors verbatim).
+Factory wire-up: `packages/agent/src/factory.ts` constructs `new SCE(new GPTTokenizer())` and passes it into the `AgentLoop`.
 
 ---
 

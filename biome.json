@@ -1,5 +1,9 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.2/schema.json",
+  "files": {
+    "ignoreUnknown": true,
+    "includes": ["core/src/**", "packages/*/src/**", "apps/server/src/**", "tests/**"]
+  },
   "linter": {
     "enabled": true,
     "rules": {
@@ -12,6 +16,18 @@
       }
     }
   },
+  "overrides": [
+    {
+      "includes": ["packages/acp/src/**"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noExplicitAny": "off"
+          }
+        }
+      }
+    }
+  ],
   "formatter": {
     "enabled": true,
     "indentStyle": "space",

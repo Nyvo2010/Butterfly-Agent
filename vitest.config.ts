@@ -1,7 +1,9 @@
 import { resolve } from "node:path"
 import { defineConfig } from "vitest/config"
 
-const ROOT = resolve(import.meta.dirname ?? __dirname)
+import { fileURLToPath } from "node:url"
+const __filename = fileURLToPath(import.meta.url)
+const ROOT = resolve(__filename, "..")
 
 export default defineConfig({
   resolve: {
@@ -15,7 +17,12 @@ export default defineConfig({
     },
   },
   test: {
-    include: ["tests/**/*.test.ts"],
+    include: [
+      "tests/**/*.test.ts",
+      "apps/server/src/**/*.test.ts",
+      "apps/server/src/**/*.test.tsx",
+      "packages/*/src/**/*.test.ts",
+    ],
     exclude: ["**/node_modules/**", "**/dist/**", "tests/simulation/**"],
     testTimeout: 120_000,
     hookTimeout: 60_000,

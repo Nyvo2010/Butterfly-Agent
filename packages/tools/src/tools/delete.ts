@@ -1,6 +1,7 @@
 import { rm } from "node:fs/promises"
 import { isAbsolute, resolve } from "node:path"
 import type { Tool } from "../types"
+import { isPathInWorkspace } from "../types"
 
 export const deleteTool: Tool<{ deleted: boolean }> = {
   name: "delete",
@@ -18,6 +19,9 @@ export const deleteTool: Tool<{ deleted: boolean }> = {
     const path = String(input.path ?? "")
     if (!path) return { kind: "err", message: "path is required" }
     const abs = isAbsolute(path) ? path : resolve(ctx.cwd, path)
+    if (ctx.workspaceRoots && !(await isPathInWorkspace(abs, ctx.workspaceRoots))) {
+      return { kind: "err", message: `access denied: ${path} is outside the workspace` }
+    }
     try {
       await rm(abs, { force: true })
       return { kind: "ok", output: { deleted: true } }

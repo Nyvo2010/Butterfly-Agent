@@ -1,15 +1,18 @@
 import type { Tool } from "../types"
 
-// Imported lazily at execution time to avoid a circular dependency:
-// @butterfly/tools → @butterfly/agent → @butterfly/tools.
-// The AgentLoop reference is injected via the tool context.
-
 export interface SubagentToolDeps {
-  spawn: (task: string, cwd: string, mode?: string, maxSteps?: number) => Promise<{
+  spawn: (
+    task: string,
+    cwd: string,
+    mode?: string,
+    maxSteps?: number,
+  ) => Promise<{
     finalOutput: string
     filesChanged: string[]
     success: boolean
   }>
+  /** Valid mode values accepted by the agent configuration. If empty, all modes are accepted. */
+  validModes?: string[]
 }
 
 export function createSubagentTool(deps: SubagentToolDeps): Tool<{
@@ -17,6 +20,8 @@ export function createSubagentTool(deps: SubagentToolDeps): Tool<{
   filesChanged: string[]
   success: boolean
 }> {
+  const validModes = deps.validModes?.length ? new Set(deps.validModes) : null
+
   return {
     name: "spawn_subagent",
     description:
@@ -26,7 +31,7 @@ export function createSubagentTool(deps: SubagentToolDeps): Tool<{
       type: "object",
       properties: {
         task: { type: "string" },
-        mode: { type: "string", enum: ["plan", "build"] },
+        mode: { type: "string" },
         maxSteps: { type: "number" },
       },
       required: ["task"],
@@ -35,13 +40,32 @@ export function createSubagentTool(deps: SubagentToolDeps): Tool<{
     async execute(input, ctx) {
       const task = String(input.task ?? "")
       if (!task) return { kind: "err", message: "task is required" }
-      const mode = String(input.mode ?? "build")
-      if (mode !== "plan" && mode !== "build") {
-        return { kind: "err", message: `invalid mode: ${mode}. Must be "plan" or "build".` }
+      const mode = String(input.mode ?? "")
+      if (validModes && mode && !validModes.has(mode)) {
+        return {
+          kind: "err",
+          message: `invalid mode: "${mode}". Must be one of: ${deps.validModes?.join(", ") ?? ""}`,
+        }
       }
-      const maxSteps = typeof input.maxSteps === "number" ? input.maxSteps : 8
+      const rawMaxSteps = typeof input.maxSteps === "number" ? input.maxSteps : undefined
+      let maxSteps = 8
+      if (rawMaxSteps !== undefined) {
+        if (!Number.isFinite(rawMaxSteps) || rawMaxSteps <= 0) {
+          return {
+            kind: "err",
+            message: `maxSteps must be a finite positive number, got ${rawMaxSteps}`,
+          }
+        }
+        if (rawMaxSteps > 50) {
+          return {
+            kind: "err",
+            message: `maxSteps cannot exceed 50, got ${rawMaxSteps}`,
+          }
+        }
+        maxSteps = Math.floor(rawMaxSteps)
+      }
       try {
-        const result = await deps.spawn(task, ctx.cwd, mode, maxSteps)
+        const result = await deps.spawn(task, ctx.cwd, mode || undefined, maxSteps)
         return { kind: "ok", output: result }
       } catch (err) {
         return { kind: "err", message: `subagent failed: ${(err as Error).message}` }

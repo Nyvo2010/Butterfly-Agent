@@ -8,3 +8,6 @@ coverage/
 *.tsbuildinfo
 .vite/
 .turbo/
+
+# Generated files from agent runs
+/FINDINGS.md

@@ -6,7 +6,7 @@ export function loadDotEnv(filePath: string = ".env"): number {
   if (!existsSync(filePath)) return 0
   const content = readFileSync(filePath, "utf8")
   let count = 0
-  for (const line of content.split("\n")) {
+  for (const line of content.split(/\r?\n/)) {
     const trimmed = line.trim()
     if (!trimmed || trimmed.startsWith("#")) continue
     const match = trimmed.match(/^([^=]+)=(.*)$/)
@@ -14,7 +14,9 @@ export function loadDotEnv(filePath: string = ".env"): number {
     const key = match[1]?.trim()
     if (!key) continue
     let val = match[2]?.trim() ?? ""
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+    if (val.startsWith('"') && val.endsWith('"')) {
+      val = val.slice(1, -1).replace(/\\(.)/g, "$1")
+    } else if (val.startsWith("'") && val.endsWith("'")) {
       val = val.slice(1, -1)
     }
     if (process.env[key] === undefined) {

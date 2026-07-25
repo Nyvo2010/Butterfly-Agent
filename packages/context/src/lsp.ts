@@ -1,10 +1,3 @@
-/**
- * LSP (Language Server Protocol) integration interface.
- *
- * Interface-only for now. Future implementations can connect to real language
- * servers for go-to-definition, find-references, diagnostics, hover, and completions.
- */
-
 export interface LSPPosition {
   line: number
   character: number
@@ -21,7 +14,7 @@ export interface LSPLocation {
 }
 
 export interface LSPDiagnostic {
-  file: string
+  uri: string
   range: LSPRange
   severity: "error" | "warning" | "info" | "hint"
   message: string
@@ -30,7 +23,7 @@ export interface LSPDiagnostic {
 
 export interface LSPSymbol {
   name: string
-  kind: string
+  kind: number
   location: LSPLocation
   containerName?: string
 }

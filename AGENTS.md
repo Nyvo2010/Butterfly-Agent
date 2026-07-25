@@ -10,28 +10,11 @@ Your output directly affects a future open-source system. That means:
 - maintainability matters more than convenience
 - clarity and modularity are important for future development
 
-When user instructions conflict with repository health, you must push back clearly and explain the risk.
+When user instructions conflict with repository health, you must push back clearly and explain the risk. Commit frequently, and ensure that every change is traceable to a user request, requirement, or bug fix.
 
 ---
 
 # Core Principles
-
-## YAGNI (Strict)
-
-You aren't gonna need it.
-- No speculative features
-- No “just in case” abstractions
-- No config options unless explicitly required
-- No generic systems for single-use logic
-
-Every line must map to:
-- MVP-SCOPE.md requirement
-- a direct user request
-- or a necessary technical constraint
-
-If it doesn’t → delete it.
-
----
 
 ## Modularity (Hard Boundary Rule)
 

@@ -15,6 +15,15 @@
     "sourceMap": true,
     "outDir": "./dist",
     "rootDir": ".",
-    "composite": true
+    "composite": true,
+    "paths": {
+      "@butterfly/core": ["./core/src/index.ts"],
+      "@butterfly/session": ["./packages/session/src/index.ts"],
+      "@butterfly/context": ["./packages/context/src/index.ts"],
+      "@butterfly/llm": ["./packages/llm/src/index.ts"],
+      "@butterfly/tools": ["./packages/tools/src/index.ts"],
+      "@butterfly/agent": ["./packages/agent/src/index.ts"]
+    },
+    "baseUrl": "."
   }
 }

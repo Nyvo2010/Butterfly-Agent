@@ -14,8 +14,8 @@
     "format": "biome format --write .",
     "clean": "rm -rf dist build .turbo"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": ["ai-agent", "coding-agent", "llm", "agent-framework"],
+  "author": "Butterfly Agent Contributors",
   "license": "MIT",
   "packageManager": "pnpm@10.33.2",
   "devDependencies": {

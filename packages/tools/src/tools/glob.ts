@@ -1,9 +1,8 @@
-import { readdir } from "node:fs/promises"
-import { isAbsolute, join, relative, resolve, sep } from "node:path"
+import { isAbsolute, relative, resolve, sep } from "node:path"
 import picomatch from "picomatch"
 import type { Tool } from "../types"
-
-const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".turbo", ".next"])
+import { isPathInWorkspace } from "../types"
+import { DEFAULT_SKIP_DIRS, walk } from "./walk"
 
 export const globTool: Tool<{ files: string[] }> = {
   name: "glob",
@@ -23,9 +22,17 @@ export const globTool: Tool<{ files: string[] }> = {
     const basePath = String(input.path ?? ".")
     if (!pattern) return { kind: "err", message: "pattern is required" }
     const base = isAbsolute(basePath) ? basePath : resolve(ctx.cwd, basePath)
+    // Enforce workspace boundary.
+    if (ctx.workspaceRoots) {
+      const isWithin = await isPathInWorkspace(base, ctx.workspaceRoots)
+      if (!isWithin) {
+        return { kind: "err", message: `access denied: ${basePath} is outside the workspace` }
+      }
+    }
     const matcher = picomatch(pattern, { dot: true })
     const files: string[] = []
-    const all = await walk(base)
+    const skipDirs = new Set([...DEFAULT_SKIP_DIRS, ...(ctx.skipDirs ?? [])])
+    const all = await walk(base, skipDirs)
     for (const file of all) {
       const rel = relative(base, file).split(sep).join("/")
       if (matcher(rel)) files.push(rel)
@@ -33,20 +40,4 @@ export const globTool: Tool<{ files: string[] }> = {
     files.sort()
     return { kind: "ok", output: { files } }
   },
-}
-
-async function walk(dir: string): Promise<string[]> {
-  const out: string[] = []
-  try {
-    const entries = await readdir(dir, { withFileTypes: true })
-    for (const e of entries) {
-      if (SKIP_DIRS.has(e.name)) continue
-      const full = join(dir, e.name)
-      if (e.isDirectory()) out.push(...(await walk(full)))
-      else if (e.isFile()) out.push(full)
-    }
-  } catch {
-    return out
-  }
-  return out
 }

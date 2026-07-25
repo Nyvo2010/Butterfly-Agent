@@ -1,17 +1,31 @@
 // Session state types. No deduplication (COE handles that). No sticky-tier/escalation
 // counters (those are Model Router runtime concerns, not session persistence).
+// All timestamp fields are ISO 8601 strings — downstream should validate.
 
 export type Role = "user" | "assistant" | "tool" | "system"
-export type Mode = "plan" | "build" | "orchestrator"
+export type Mode = "plan" | "build"
 export type Tier = "trivial" | "standard" | "complex" | "escalate"
 
-export interface SessionMessage {
+export interface UserOrSystemMessage {
   id: string
-  role: Role
+  role: "user" | "assistant" | "system"
   content: string
-  toolCallId?: string // REQUIRED when role === "tool"; runtime-enforced.
+  timestamp: string
+  /** Optional tool call correlation ID for assistant messages. Set by the agent
+   * loop when the assistant emits tool calls, so COE can group tool messages
+   * with their parent assistant message without relying on string patterns. */
+  toolCallId?: string
+}
+
+export interface ToolMessage {
+  id: string
+  role: "tool"
+  content: string
+  toolCallId: string
   timestamp: string
 }
+
+export type SessionMessage = UserOrSystemMessage | ToolMessage
 
 export interface ToolCallRecord {
   id: string

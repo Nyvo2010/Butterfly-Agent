@@ -1,21 +1,39 @@
 // Public wire-level types for LLMClient. Pure types; no runtime code.
 
-export type LLMRole = "user" | "assistant" | "tool" | "system"
+export type LLMImageMimeType =
+  | "image/jpeg"
+  | "image/png"
+  | "image/gif"
+  | "image/webp"
+  | "image/avif"
 
 /** Content part for multimodal messages (image support). */
 export type LLMContentPart =
   | { type: "text"; text: string }
-  | { type: "image"; mimeType: string; data: string } // base64-encoded image data
+  | { type: "image"; mimeType: LLMImageMimeType; data: string }
 
-/**
- * LLMMessage content can be either a plain string or an array of content parts.
- * Plain string is the common case; array enables multimodal (text + image) messages.
- */
-export interface LLMMessage {
-  role: LLMRole
+export interface LLMUserMessage {
+  role: "user"
   content: string | LLMContentPart[]
-  toolCallId?: string // REQUIRED when role === "tool"; runtime-enforced.
 }
+
+export interface LLMAssistantMessage {
+  role: "assistant"
+  content: string | LLMContentPart[]
+}
+
+export interface LLMToolMessage {
+  role: "tool"
+  content: string | LLMContentPart[]
+  toolCallId: string
+}
+
+export interface LLMSystemMessage {
+  role: "system"
+  content: string | LLMContentPart[]
+}
+
+export type LLMMessage = LLMUserMessage | LLMAssistantMessage | LLMToolMessage | LLMSystemMessage
 
 export interface LLMToolSpec {
   name: string
@@ -27,6 +45,8 @@ export interface LLMUsage {
   promptTokens: number
   completionTokens: number
   totalTokens: number
+  /** When false, the token counts are defaults (0) and not from the provider. */
+  usageAvailable: boolean
 }
 
 export interface LLMRequest {
@@ -51,7 +71,13 @@ export interface ToolCallParser {
 /** Streaming delta emitted during a streamed completion. */
 export type LLMStreamEvent =
   | { kind: "text_delta"; text: string }
-  | { kind: "tool_call_delta"; id: string; name?: string; input?: unknown }
+  | {
+      kind: "tool_call_delta"
+      id: string
+      name?: string
+      /** Complete tool arguments at this point, not incremental deltas. */
+      input?: unknown
+    }
   | { kind: "done"; usage: LLMUsage; finishReason: string }
   | { kind: "error"; message: string }
 

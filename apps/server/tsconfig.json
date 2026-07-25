@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "skipLibCheck": true
+  },
+  "include": ["src", "../../packages/agent/src", "../../packages/context/src", "../../packages/llm/src", "../../packages/session/src", "../../packages/tools/src", "../../core/src"]
+}

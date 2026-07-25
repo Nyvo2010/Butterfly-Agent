@@ -1,6 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises"
 import { isAbsolute, resolve } from "node:path"
 import type { Tool } from "../types"
+import { isPathInWorkspace } from "../types"
 
 interface Hunk {
   oldStart: number
@@ -21,6 +22,7 @@ function parseDiff(diff: string): Hunk[] {
   let current: Hunk | null = null
 
   for (const line of diff.split("\n")) {
+    if (line === "\\ No newline at end of file") continue
     const headerMatch = line.match(hunkHeaderRe)
     if (headerMatch) {
       if (current) hunks.push(current)
@@ -33,8 +35,13 @@ function parseDiff(diff: string): Hunk[] {
       }
       continue
     }
-    if (current && (line.startsWith(" ") || line.startsWith("+") || line.startsWith("-") || line === "")) {
-      current.lines.push(line)
+    if (
+      current &&
+      (line.startsWith(" ") || line.startsWith("+") || line.startsWith("-") || line === "")
+    ) {
+      // Normalize blank context lines to " " (space + empty) so they
+      // match the standard diff format and don't break index calculations.
+      current.lines.push(line === "" ? " " : line)
     }
   }
   if (current) hunks.push(current)
@@ -57,39 +64,29 @@ function applyHunks(original: string, hunks: Hunk[]): string | Error {
 }
 
 function applyHunk(lines: string[], hunk: Hunk): string[] | Error {
-  const oldIdx = hunk.oldStart - 1 // 1-based to 0-based
+  const oldIdx = Math.max(0, hunk.oldStart - 1) // 1-based to 0-based; guard against oldStart=0 in add-only hunks
   const expectedContext: string[] = []
   const newLines: string[] = []
 
   for (const line of hunk.lines) {
     if (line.startsWith(" ")) {
-      // Context line — must match.
       const ctx = line.slice(1)
       expectedContext.push(ctx)
       newLines.push(ctx)
     } else if (line.startsWith("-")) {
       const removed = line.slice(1)
       expectedContext.push(removed)
-      // Don't add to newLines.
     } else if (line.startsWith("+")) {
       const added = line.slice(1)
       newLines.push(added)
-    } else {
-      // Empty context line or trailing whitespace.
-      expectedContext.push(line)
-      newLines.push(line)
     }
   }
 
-  // Verify context matches.
+  // Verify context matches (including removed lines).
   if (expectedContext.length > 0) {
     const actualSlice = lines.slice(oldIdx, oldIdx + expectedContext.length)
     let mismatches = 0
     for (let i = 0; i < expectedContext.length; i++) {
-      // Removed lines in the diff appear in expectedContext but not in newLines.
-      // We check only context lines (not removed ones) against the file.
-      const hunkLine = hunk.lines[i]
-      if (hunkLine?.startsWith("-")) continue // skip removed lines in verification
       if (actualSlice[i] !== expectedContext[i]) {
         mismatches++
       }
@@ -130,6 +127,9 @@ export const diffPatchTool: Tool<{ patched: boolean; hunksApplied: number }> = {
     if (!path) return { kind: "err", message: "path is required" }
     if (!diff) return { kind: "err", message: "diff is required" }
     const abs = isAbsolute(path) ? path : resolve(ctx.cwd, path)
+    if (ctx.workspaceRoots && !(await isPathInWorkspace(abs, ctx.workspaceRoots))) {
+      return { kind: "err", message: `access denied: ${path} is outside the workspace` }
+    }
 
     let original: string
     try {
