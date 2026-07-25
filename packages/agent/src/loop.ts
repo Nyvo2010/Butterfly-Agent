@@ -794,6 +794,12 @@ async function completeWithStream(
       case "text_delta":
         text += event.text
         break
+      case "reasoning_start":
+      case "reasoning_delta":
+      case "reasoning_end":
+        // Reasoning blocks are passed through to the UI via onStreamEvent.
+        // They do not contribute to the final response text or tool calls.
+        break
       case "tool_call_delta": {
         const existing = toolCalls.get(event.id) ?? { id: event.id, name: "", input: undefined }
         if (event.name) existing.name = event.name

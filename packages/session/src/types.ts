@@ -6,10 +6,24 @@ export type Role = "user" | "assistant" | "tool" | "system"
 export type Mode = "plan" | "build"
 export type Tier = "trivial" | "standard" | "complex" | "escalate"
 
+/**
+ * Structured message part — mirrors OpenCode's granular message parts.
+ * Each message can consist of multiple parts: text, reasoning, tool calls.
+ */
+export type MessagePart =
+  | { type: "text"; text: string }
+  | { type: "reasoning"; text: string }
+  | { type: "tool_call"; id: string; name: string; input: unknown }
+  | { type: "tool_result"; toolCallId: string; output: unknown }
+
 export interface UserOrSystemMessage {
   id: string
   role: "user" | "assistant" | "system"
   content: string
+  /** Structured parts for granular message representation (OpenCode-compatible).
+   * When present, `parts` takes precedence for rendering; `content` is the
+   * canonical plain-text serialization used by COE and LLM calls. */
+  parts?: MessagePart[]
   timestamp: string
   /** Optional tool call correlation ID for assistant messages. Set by the agent
    * loop when the assistant emits tool calls, so COE can group tool messages
@@ -21,6 +35,8 @@ export interface ToolMessage {
   id: string
   role: "tool"
   content: string
+  /** Structured parts for tool results (OpenCode-compatible). */
+  parts?: MessagePart[]
   toolCallId: string
   timestamp: string
 }
@@ -53,6 +69,9 @@ export interface SessionState {
   toolCalls: ToolCallRecord[]
   fileChanges: FileChange[]
   readFiles: string[]
+  /** Git snapshot hashes keyed by iteration number. Maps iteration → tree hash.
+   * Mirrors OpenCode's snapshot system for session revert support. */
+  snapshots?: Record<number, string>
   startedAt: string
   updatedAt: string
 }

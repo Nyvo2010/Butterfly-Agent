@@ -1,5 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises"
 import { isAbsolute, resolve } from "node:path"
+import { formatFile } from "../formatter"
 import type { Tool } from "../types"
 import { isPathInWorkspace } from "../types"
 
@@ -43,6 +44,8 @@ export const patchTool: Tool<{ patched: boolean }> = {
         newText.replace(/\$/g, "$$$"),
       )
       await writeFile(abs, after, "utf8")
+      // Auto-format after patch if a matching formatter is available.
+      formatFile(ctx.cwd, abs)
       return { kind: "ok", output: { patched: true } }
     } catch (err) {
       return { kind: "err", message: `patch failed: ${(err as Error).message}` }

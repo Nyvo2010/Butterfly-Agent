@@ -26,12 +26,45 @@ export { VercelAILLMClient } from "./vercel-adapter"
 /**
  * Provider configuration — OpenCode-compatible.
  * Each provider has a type, API key, and optional base URL.
+ * Supports: openai, anthropic, gemini, openai-compatible, deepseek, groq,
+ * togetherai, fireworks, cerebras, xai, openrouter, mistral, cohere, perplexity.
  */
 export interface ProviderConfig {
-  provider: "openai" | "anthropic" | "gemini"
+  provider:
+    | "openai"
+    | "anthropic"
+    | "gemini"
+    | "openai-compatible"
+    | "deepseek"
+    | "groq"
+    | "togetherai"
+    | "fireworks"
+    | "cerebras"
+    | "xai"
+    | "openrouter"
+    | "mistral"
+    | "cohere"
+    | "perplexity"
   apiKey: string
   baseURL?: string
   disabled?: boolean
+}
+
+/**
+ * Known provider profiles with default base URLs.
+ * Mirrors OpenCode's openai-compatible profile system.
+ */
+export const PROVIDER_PROFILES: Record<string, { baseURL: string }> = {
+  deepseek: { baseURL: "https://api.deepseek.com/v1" },
+  groq: { baseURL: "https://api.groq.com/openai/v1" },
+  togetherai: { baseURL: "https://api.together.xyz/v1" },
+  fireworks: { baseURL: "https://api.fireworks.ai/inference/v1" },
+  cerebras: { baseURL: "https://api.cerebras.ai/v1" },
+  xai: { baseURL: "https://api.x.ai/v1" },
+  openrouter: { baseURL: "https://openrouter.ai/api/v1" },
+  mistral: { baseURL: "https://api.mistral.ai/v1" },
+  cohere: { baseURL: "https://api.cohere.ai/v1" },
+  perplexity: { baseURL: "https://api.perplexity.ai" },
 }
 
 /**
@@ -58,7 +91,7 @@ export function createClient(
 
   if (providerCfg && !providerCfg.disabled) {
     const apiKey = providerCfg.apiKey || cfg.apiKey
-    const baseURL = providerCfg.baseURL
+    const baseURL = providerCfg.baseURL || PROVIDER_PROFILES[providerCfg.provider]?.baseURL
 
     switch (providerCfg.provider) {
       case "anthropic":
@@ -66,6 +99,19 @@ export function createClient(
       case "gemini":
         return new GeminiClient({ apiKey, model: modelId || undefined })
       case "openai":
+        return new VercelAILLMClient({ apiKey, baseUrl: baseURL || cfg.baseUrl || undefined })
+      // All OpenAI-compatible providers use the Vercel AI SDK client.
+      case "openai-compatible":
+      case "deepseek":
+      case "groq":
+      case "togetherai":
+      case "fireworks":
+      case "cerebras":
+      case "xai":
+      case "openrouter":
+      case "mistral":
+      case "cohere":
+      case "perplexity":
         return new VercelAILLMClient({ apiKey, baseUrl: baseURL || cfg.baseUrl || undefined })
     }
   }

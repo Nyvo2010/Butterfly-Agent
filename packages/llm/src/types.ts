@@ -78,6 +78,9 @@ export type LLMStreamEvent =
       /** Complete tool arguments at this point, not incremental deltas. */
       input?: unknown
     }
+  | { kind: "reasoning_start"; id: string }
+  | { kind: "reasoning_delta"; id: string; text: string }
+  | { kind: "reasoning_end"; id: string }
   | { kind: "done"; usage: LLMUsage; finishReason: string }
   | { kind: "error"; message: string }
 

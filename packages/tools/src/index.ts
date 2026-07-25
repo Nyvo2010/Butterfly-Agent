@@ -2,20 +2,38 @@ export { connectAllMCPServers, disconnectAllMCPServers, resetMCPConnections } fr
 export type { PluginContext } from "./plugins"
 export { activateAllPlugins, deactivateAllPlugins } from "./plugins"
 export { ToolRegistry } from "./registry"
+export {
+  discoverSkills,
+  formatSkillsForPrompt,
+  getAllSkills,
+  getSkill,
+  resetSkills,
+} from "./skills"
+export type { SkillInfo } from "./skills"
+export { formatFile } from "./formatter"
+export { applyPatchTool } from "./tools/apply-patch"
 export { bashTool, isCommandSafe } from "./tools/bash"
 export { deleteTool } from "./tools/delete"
 export { diffPatchTool } from "./tools/diff-patch"
 export { globTool } from "./tools/glob"
 export { grepTool } from "./tools/grep"
 export { listTool } from "./tools/list"
+export { createLspTool } from "./tools/lsp"
+export type { LSPClientLike } from "./tools/lsp"
 export { patchTool } from "./tools/patch"
+export { planExitTool } from "./tools/plan-exit"
 export { questionTool } from "./tools/question"
 export { readTool } from "./tools/read"
 export type { RollbackToolDeps } from "./tools/rollback"
 export { createRollbackTool } from "./tools/rollback"
 export type { SearchToolDeps } from "./tools/search"
 export { createSearchTool } from "./tools/search"
+export { createSkillTool } from "./tools/skill"
 export type { SubagentToolDeps } from "./tools/subagent"
 export { createSubagentTool } from "./tools/subagent"
+export { createTodowriteTool } from "./tools/todowrite"
+export type { TodoItem } from "./tools/todowrite"
+export { webFetchTool } from "./tools/webfetch"
+export { webSearchTool } from "./tools/websearch"
 export { writeTool } from "./tools/write"
 export type { Tool, ToolKind } from "./types"

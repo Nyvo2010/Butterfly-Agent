@@ -1,10 +1,20 @@
-import { exec } from "node:child_process"
-import { promisify } from "node:util"
+/**
+ * Bash tool — spawn-based shell execution with timeout, abort, workdir,
+ * and output truncation. Mirrors OpenCode's ShellTool architecture:
+ * streaming spawn instead of single-shot exec, workdir parameter,
+ * timeout/abort support, and output size limits with file offload.
+ */
+
+import { spawn, type ChildProcess } from "node:child_process"
+import { mkdir, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { randomBytes } from "node:crypto"
 import type { Tool } from "../types"
 
-const execAsync = promisify(exec)
-const DEFAULT_TIMEOUT_MS = 30_000
-const MAX_BUFFER_BYTES = 10 * 1024 * 1024
+const DEFAULT_TIMEOUT_MS = 2 * 60 * 1000 // 2 minutes, matching OpenCode default
+const MAX_OUTPUT_BYTES = 100_000 // ~100KB in-memory before truncation
+const MAX_LINES = 200
 
 const CRITICAL_ENV_VARS = new Set([
   "PATH",
@@ -18,12 +28,6 @@ const CRITICAL_ENV_VARS = new Set([
 ])
 
 // Shell metacharacters that indicate command injection risk.
-// Allows: pipes (|), flags (-x), quotes, spaces, paths, env vars ($VAR),
-// and command chaining (&&, ||) for legitimate multi-step workflows.
-// Blocks only: command separators (;), newlines, command substitution ($(), ``),
-// variable expansion (${}). Dangerous uses of && and || are caught by
-// DANGEROUS_PATTERNS (e.g., && rm -rf /).
-// Combined with DANGEROUS_PATTERNS for defense-in-depth.
 export const INJECTION_METACHAR_RE = /[;\n`]|\$\(|\$\{/
 
 const DANGEROUS_PATTERNS = [
@@ -64,30 +68,163 @@ export function isCommandSafe(command: string): boolean {
   return true
 }
 
-function mergeEnv(ctxEnv?: Record<string, string>): Record<string, string> | undefined {
-  if (!ctxEnv || Object.keys(ctxEnv).length === 0) return undefined
+function mergeEnv(ctxEnv?: Record<string, string>): Record<string, string> {
   const merged: Record<string, string> = {}
   for (const [key, value] of Object.entries(process.env)) {
     if (value !== undefined) merged[key] = value
   }
-  for (const [key, value] of Object.entries(ctxEnv)) {
-    if (!CRITICAL_ENV_VARS.has(key)) {
-      merged[key] = value
+  if (ctxEnv) {
+    for (const [key, value] of Object.entries(ctxEnv)) {
+      if (!CRITICAL_ENV_VARS.has(key)) merged[key] = value
     }
   }
   return merged
 }
 
+/**
+ * Tail the last N lines up to maxBytes. OpenCode-compatible truncation.
+ * Returns { text, cut } where cut=true means lines were dropped.
+ */
+function tail(text: string, maxLines: number, maxBytes: number): { text: string; cut: boolean } {
+  const lines = text.split("\n")
+  if (lines.length <= maxLines && Buffer.byteLength(text, "utf-8") <= maxBytes) {
+    return { text, cut: false }
+  }
+
+  const out: string[] = []
+  let bytes = 0
+  for (let i = lines.length - 1; i >= 0 && out.length < maxLines; i--) {
+    const size = Buffer.byteLength(lines[i], "utf-8") + (out.length > 0 ? 1 : 0)
+    if (bytes + size > maxBytes) {
+      if (out.length === 0) {
+        // One line is bigger than maxBytes — take the suffix.
+        const buf = Buffer.from(lines[i], "utf-8")
+        let start = buf.length - maxBytes
+        if (start < 0) start = 0
+        while (start < buf.length && (buf[start] & 0xc0) === 0x80) start++
+        out.unshift(buf.subarray(start).toString("utf-8"))
+      }
+      break
+    }
+    out.unshift(lines[i])
+    bytes += size
+  }
+  return { text: out.join("\n"), cut: true }
+}
+
+/**
+ * Spawn a child process and capture stdout/stderr with timeout and abort support.
+ * Mirrors OpenCode's ChildProcess.spawn + stream pattern.
+ */
+function spawnCommand(
+  command: string,
+  cwd: string,
+  env: Record<string, string>,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<{ stdout: string; stderr: string; exitCode: number | null; killed: boolean; timedOut: boolean }> {
+  return new Promise((resolve) => {
+    const child: ChildProcess = spawn(command, {
+      shell: true,
+      cwd,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+
+    const stdoutChunks: Buffer[] = []
+    const stderrChunks: Buffer[] = []
+    let totalBytes = 0
+    let killed = false
+    let timedOut = false
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      totalBytes += chunk.length
+      if (totalBytes <= MAX_OUTPUT_BYTES * 2) {
+        stdoutChunks.push(chunk)
+      }
+    })
+
+    child.stderr?.on("data", (chunk: Buffer) => {
+      totalBytes += chunk.length
+      if (totalBytes <= MAX_OUTPUT_BYTES * 2) {
+        stderrChunks.push(chunk)
+      }
+    })
+
+    // Timeout
+    const timer = setTimeout(() => {
+      timedOut = true
+      killed = true
+      child.kill("SIGTERM")
+      // Force kill after 3 seconds if still alive (matching OpenCode).
+      setTimeout(() => {
+        if (child.exitCode === null) {
+          child.kill("SIGKILL")
+        }
+      }, 3000).unref()
+    }, timeoutMs)
+    if (timer.unref) timer.unref()
+
+    // Abort signal
+    const onAbort = () => {
+      killed = true
+      child.kill("SIGTERM")
+      setTimeout(() => {
+        if (child.exitCode === null) {
+          child.kill("SIGKILL")
+        }
+      }, 3000).unref()
+    }
+    signal?.addEventListener("abort", onAbort, { once: true })
+
+    child.on("close", (code) => {
+      clearTimeout(timer)
+      signal?.removeEventListener("abort", onAbort)
+
+      resolve({
+        stdout: Buffer.concat(stdoutChunks).toString("utf-8"),
+        stderr: Buffer.concat(stderrChunks).toString("utf-8"),
+        exitCode: code,
+        killed,
+        timedOut,
+      })
+    })
+
+    child.on("error", (err) => {
+      clearTimeout(timer)
+      signal?.removeEventListener("abort", onAbort)
+
+      resolve({
+        stdout: Buffer.concat(stdoutChunks).toString("utf-8"),
+        stderr: `${err.message}\n${Buffer.concat(stderrChunks).toString("utf-8")}`,
+        exitCode: 1,
+        killed: false,
+        timedOut: false,
+      })
+    })
+  })
+}
+
 export const bashTool: Tool<{ stdout: string; stderr: string; exitCode: number }> = {
   name: "bash",
   description:
-    "Run a shell command. Returns stdout, stderr, and exitCode. Times out after maxDuration ms (default 30000).",
+    "Run a shell command. Returns stdout, stderr, and exitCode. " +
+    `Commands time out after a default ${DEFAULT_TIMEOUT_MS}ms. ` +
+    "Use workdir to run in a different directory (instead of cd). " +
+    "Output over 100KB is truncated; use grep/read tools for full inspection.",
   kind: "exec",
   inputSchema: {
     type: "object",
     properties: {
-      command: { type: "string" },
-      maxDuration: { type: "number" },
+      command: { type: "string", description: "The command to execute" },
+      timeout: {
+        type: "number",
+        description: `Optional timeout in milliseconds (default ${DEFAULT_TIMEOUT_MS})`,
+      },
+      workdir: {
+        type: "string",
+        description: "The working directory to run the command in. Use this instead of cd.",
+      },
     },
     required: ["command"],
     additionalProperties: false,
@@ -95,56 +232,70 @@ export const bashTool: Tool<{ stdout: string; stderr: string; exitCode: number }
   async execute(input, ctx) {
     const command = String(input.command ?? "")
     if (!command) return { kind: "err", message: "command is required" }
-    // Always check dangerous patterns regardless of shell metacharacters.
-    // Previously, commands matching SAFE_COMMAND_RE (e.g., "rm -rf /") bypassed
-    // the dangerous pattern check, creating a security gap.
+
     if (!isCommandSafe(command)) {
       return { kind: "err", message: "Command contains dangerous patterns and was blocked." }
     }
-    // Additionally check for command injection metacharacters
-    // (separators, chaining, substitution) that indicate injection risk
-    // even if no known dangerous patterns match.
     if (INJECTION_METACHAR_RE.test(command)) {
       return { kind: "err", message: "Command contains shell metacharacters and was blocked." }
     }
-    const rawDuration = Number(input.maxDuration ?? DEFAULT_TIMEOUT_MS)
-    // Validate: reject non-positive, NaN, or Infinity values.
-    const maxDuration =
-      Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : DEFAULT_TIMEOUT_MS
+
+    const timeout = Number.isFinite(Number(input.timeout)) && Number(input.timeout) > 0
+      ? Number(input.timeout)
+      : DEFAULT_TIMEOUT_MS
+
+    const workdir = typeof input.workdir === "string" && input.workdir
+      ? input.workdir
+      : ctx.cwd
+
     const env = mergeEnv(ctx.env)
+
     try {
-      const result = await execAsync(command, {
-        cwd: ctx.cwd,
-        timeout: maxDuration,
-        maxBuffer: MAX_BUFFER_BYTES,
-        env: env ?? process.env,
-      })
-      return { kind: "ok", output: { stdout: result.stdout, stderr: result.stderr, exitCode: 0 } }
-    } catch (err) {
-      const e = err as {
-        stdout?: string
-        stderr?: string
-        code?: number
-        signal?: string
-        message?: string
-        killed?: boolean
+      const result = await spawnCommand(command, workdir, env, timeout, ctx.signal)
+
+      let meta = ""
+      if (result.timedOut) {
+        meta += `\n\n<shell_metadata>Command terminated after exceeding timeout ${timeout}ms. If this command is expected to take longer, retry with a larger timeout value.</shell_metadata>`
       }
-      if (
-        typeof e.stdout === "string" ||
-        typeof e.stderr === "string" ||
-        typeof e.code === "number" ||
-        e.signal
-      ) {
-        return {
-          kind: "ok",
-          output: {
-            stdout: e.stdout ?? "",
-            stderr: e.stderr ?? "",
-            exitCode: typeof e.code === "number" ? e.code : e.signal ? -1 : 1,
-          },
+      if (result.killed && !result.timedOut) {
+        meta += `\n\n<shell_metadata>Command was aborted.</shell_metadata>`
+      }
+
+      // Truncate output if too large, save full output to a temp file.
+      let stdout = result.stdout
+      const stdoutSize = Buffer.byteLength(stdout, "utf-8")
+      let truncated = false
+
+      if (stdoutSize > MAX_OUTPUT_BYTES) {
+        truncated = true
+        const tmpFile = join(tmpdir(), `butterfly-shell-${randomBytes(4).toString("hex")}.txt`)
+        try {
+          await mkdir(tmpdir(), { recursive: true })
+          await writeFile(tmpFile, stdout, "utf-8")
+          const tailed = tail(stdout, MAX_LINES, MAX_OUTPUT_BYTES)
+          stdout = tailed.text
+          if (truncated && tmpFile) {
+            stdout = `...output truncated to ${MAX_LINES} lines / ${MAX_OUTPUT_BYTES} bytes...\nFull output saved to: ${tmpFile}\n\n${stdout}`
+          }
+        } catch {
+          // Fallback: just tail without file save if tmp write fails.
+          const tailed = tail(stdout, MAX_LINES, MAX_OUTPUT_BYTES)
+          stdout = tailed.text
         }
       }
-      return { kind: "err", message: e.message ?? "bash failed" }
+
+      if (!stdout && !result.stderr) stdout = "(no output)"
+
+      return {
+        kind: "ok",
+        output: {
+          stdout: stdout + meta,
+          stderr: result.stderr,
+          exitCode: result.exitCode ?? 1,
+        },
+      }
+    } catch (err) {
+      return { kind: "err", message: (err as Error).message ?? "bash failed" }
     }
   },
 }

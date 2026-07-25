@@ -1,7 +1,11 @@
+import { execFile } from "node:child_process"
 import { readFile, stat } from "node:fs/promises"
 import { join, relative, sep } from "node:path"
+import { promisify } from "node:util"
 import { isBinaryFile, log, walkWithDefaults } from "@butterfly/core"
 import type { ContextSlice, FileSnippet, GrepMatch, SCEOptions, Tokenizer } from "./types"
+
+const execFileAsync = promisify(execFile)
 
 const DEFAULT_MAX_FILES = 5
 const DEFAULT_MAX_TOKENS_PER_FILE = 2000
@@ -220,10 +224,153 @@ export class SCE {
     return { grepMatches, fileSnippets, warnings }
   }
 
+  /**
+   * Try to use ripgrep (rg) binary for fast search. Falls back to Node.js
+   * file-walking grep when ripgrep is not available.
+   */
   private async grep(query: string, cwd: string, maxResults: number): Promise<GrepMatch[]> {
     const re = queryToRegex(query)
     if (re.toString() === "/$.^/") return []
 
+    // Build a ripgrep-compatible pattern from the regex.
+    // queryToRegex returns an alternation of escaped tokens (e.g., /resolve|model/im).
+    // Ripgrep handles regex natively, so pass the alternation pattern directly.
+    const tokens = [
+      ...new Set((query.match(/\b[\w-]{2,}\b/g) ?? []).map((t) => t.toLowerCase())),
+    ].filter((t) => !STOP_WORDS.has(t))
+
+    if (tokens.length === 0 && query.trim()) {
+      // No extractable tokens — use fixed-string search to avoid ripgrep
+      // interpreting raw user query as regex (could error on metacharacters).
+      try {
+        return await this.ripgrepFixedSearch(query.trim(), cwd, maxResults)
+      } catch {
+        log("debug", "sce.ripgrep_fixed_unavailable", { cwd })
+        return this.nodeGrep(re, cwd, maxResults)
+      }
+    }
+
+    const rgPattern = tokens.join("|")
+    if (!rgPattern) return []
+
+    try {
+      return await this.ripgrepSearch(rgPattern, cwd, maxResults)
+    } catch {
+      // Ripgrep unavailable or failed — fall back to Node.js file-walking.
+      log("debug", "sce.ripgrep_unavailable", { cwd })
+      return this.nodeGrep(re, cwd, maxResults)
+    }
+  }
+
+  /**
+   * Build ripgrep arguments shared across regex and fixed-string modes.
+   */
+  private ripgrepArgs(pattern: string, maxResults: number, fixedStrings: boolean): string[] {
+    return [
+      "--no-heading",
+      "--with-filename",
+      "--line-number",
+      "--max-count",
+      String(maxResults),
+      "--max-filesize",
+      `${MAX_GREP_FILE_BYTES}`,
+      "--glob",
+      "!node_modules",
+      "--glob",
+      "!.git",
+      "--glob",
+      "!dist",
+      "--glob",
+      "!build",
+      "--glob",
+      "!.turbo",
+      "--glob",
+      "!.next",
+      ...(fixedStrings ? ["-F"] : []),
+      "-e",
+      pattern,
+    ]
+  }
+
+  /**
+   * Search using the ripgrep binary. Fast — uses native code with
+   * automatic .gitignore honoring, binary-file skipping, and parallel I/O.
+   */
+  private async ripgrepSearch(
+    pattern: string,
+    cwd: string,
+    maxResults: number,
+  ): Promise<GrepMatch[]> {
+    const args = this.ripgrepArgs(pattern, maxResults, false)
+
+    const { stdout } = await execFileAsync("rg", args, {
+      cwd,
+      maxBuffer: 10 * 1024 * 1024, // 10MB
+      timeout: 10_000,
+    })
+
+    const matches: GrepMatch[] = []
+    for (const line of stdout.split("\n")) {
+      if (!line.trim() || matches.length >= maxResults) break
+      // ripgrep output format: "file:line:content"
+      const colonIdx = line.indexOf(":")
+      if (colonIdx === -1) continue
+      const secondColon = line.indexOf(":", colonIdx + 1)
+      if (secondColon === -1) continue
+      const file = line.slice(0, colonIdx)
+      const lineNum = Number.parseInt(line.slice(colonIdx + 1, secondColon), 10)
+      const content = line.slice(secondColon + 1)
+      if (!Number.isNaN(lineNum)) {
+        matches.push({ file, line: lineNum, content })
+      }
+    }
+    return matches
+  }
+
+  /**
+   * Fixed-string search using ripgrep (no regex interpretation).
+   * Used when the query has no extractable keyword tokens, to avoid
+   * ripgrep interpreting user input containing regex metacharacters.
+   */
+  private async ripgrepFixedSearch(
+    pattern: string,
+    cwd: string,
+    maxResults: number,
+  ): Promise<GrepMatch[]> {
+    const args = this.ripgrepArgs(pattern, maxResults, true)
+
+    const { stdout } = await execFileAsync("rg", args, {
+      cwd,
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 10_000,
+    })
+
+    const matches: GrepMatch[] = []
+    for (const line of stdout.split("\n")) {
+      if (!line.trim() || matches.length >= maxResults) break
+      const colonIdx = line.indexOf(":")
+      if (colonIdx === -1) continue
+      const secondColon = line.indexOf(":", colonIdx + 1)
+      if (secondColon === -1) continue
+      const file = line.slice(0, colonIdx)
+      const lineNum = Number.parseInt(line.slice(colonIdx + 1, secondColon), 10)
+      const content = line.slice(secondColon + 1)
+      if (!Number.isNaN(lineNum)) {
+        matches.push({ file, line: lineNum, content })
+      }
+    }
+    return matches
+  }
+
+  /**
+   * Fallback: walk filesystem tree and grep each file with Node.js regex.
+   * Slower than ripgrep but works without external dependencies.
+   */
+  private async nodeGrep(
+    re: RegExp,
+    cwd: string,
+    maxResults: number,
+  ): Promise<GrepMatch[]> {
     const matches: GrepMatch[] = []
     const files = await walkWithDefaults(cwd)
     for (const file of files) {

@@ -4,6 +4,7 @@ export type { SessionStore } from "./store"
 export { InMemorySessionStore } from "./store"
 export type {
   FileChange,
+  MessagePart,
   Mode,
   Role,
   SessionMessage,
@@ -12,3 +13,5 @@ export type {
   ToolCallRecord,
 } from "./types"
 export { createSession } from "./types"
+export type { TodoItem } from "./todo"
+export { clearTodos, getTodos, updateTodos } from "./todo"

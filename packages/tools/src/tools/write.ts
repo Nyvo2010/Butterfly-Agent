@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises"
 import { dirname, isAbsolute, resolve } from "node:path"
+import { formatFile } from "../formatter"
 import type { Tool } from "../types"
 import { isPathInWorkspace } from "../types"
 
@@ -36,6 +37,8 @@ export const writeTool: Tool<{ bytesWritten: number }> = {
     try {
       await mkdir(dirname(abs), { recursive: true })
       await writeFile(abs, content, "utf8")
+      // Auto-format after write if a matching formatter is available.
+      formatFile(ctx.cwd, abs)
       return { kind: "ok", output: { bytesWritten: contentBytes } }
     } catch (err) {
       return { kind: "err", message: `write failed: ${(err as Error).message}` }

@@ -13,31 +13,56 @@
 import { COE, type GPTTokenizer, SCE } from "@butterfly/context"
 import { type ButterflyConfig, DEFAULT_CONFIG, detectProject, log } from "@butterfly/core"
 import { ForgivingToolCallParser, type LLMClient, type LLMStreamEvent } from "@butterfly/llm"
-import type { FileChange, SessionState, SessionStore } from "@butterfly/session"
+import type { FileChange, SessionState, SessionStore, TodoItem } from "@butterfly/session"
+import { clearTodos, getTodos, updateTodos } from "@butterfly/session"
+import type { LSPClientLike } from "@butterfly/tools"
 import {
   activateAllPlugins,
+  applyPatchTool,
   bashTool,
+  createLspTool,
   createRollbackTool,
   createSearchTool,
+  createSkillTool,
   createSubagentTool,
+  createTodowriteTool,
   deactivateAllPlugins,
   deleteTool,
   diffPatchTool,
+  discoverSkills,
+  formatSkillsForPrompt,
   globTool,
   grepTool,
   listTool,
   patchTool,
+  planExitTool,
   questionTool,
   readTool,
   type ToolRegistry,
   ToolRegistry as ToolRegistryClass,
+  webFetchTool,
+  webSearchTool,
   writeTool,
 } from "@butterfly/tools"
+import { startBackgroundJobs } from "./jobs"
 import { AgentLoop } from "./loop"
 import { buildPermissionHook } from "./permission"
 import { QualityMonitor } from "./quality-monitor"
 import { ModelRouter } from "./router"
+import { getSnapshotService } from "./snapshot"
 import { Subagent } from "./subagent"
+
+/**
+ * No-op LSP client — returns "not available" for all operations.
+ * Used as default until a real LSP client is wired by the CLI/server.
+ */
+class NoOpLSPClient implements LSPClientLike {
+  async goToDefinition(): Promise<Array<{ uri: string; range: unknown }>> { return [] }
+  async findReferences(): Promise<Array<{ uri: string; range: unknown }>> { return [] }
+  async hover(): Promise<string | null> { return null }
+  async getDocumentSymbols(): Promise<Array<{ name: string; kind: number }>> { return [] }
+  async getDiagnostics(): Promise<Array<{ uri: string; range: unknown; severity: string; message: string }>> { return [] }
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -65,8 +90,14 @@ export interface AgentFactoryOptions {
   onAskUser?: (question: string, options?: string[]) => Promise<string | null>
 
   /**
+   * Optional LSP client for code intelligence (go-to-definition, find-references, etc.).
+   * When not set, the LSP tool returns a friendly "LSP not available" message.
+   * Pass StdioLSPClient from @butterfly/context for real LSP support.
+   */
+  lspClient?: import("@butterfly/tools").LSPClientLike
+  /**
    * Additional tools to register beyond the standard set.
-   * Use this for LSP tools, MCP tools, custom user tools, and plugins.
+   * Use this for MCP tools, custom user tools, and plugins.
    */
   extraTools?: import("@butterfly/tools").Tool[]
   /**
@@ -95,17 +126,40 @@ export interface AgentFactoryResult {
 export async function createAgent(opts: AgentFactoryOptions): Promise<AgentFactoryResult> {
   const registry = new ToolRegistryClass()
 
+  // Mutable session ID ref for session-scoped tools (todowrite, etc.).
+  // The loop sets this when it starts running so tools can reference
+  // the active session without the ToolContext carrying sessionId.
+  const sessionRef = { current: "" }
+
   // Register essential base tools (minimal set, OpenCode-inspired)
   registry.register(readTool)
   registry.register(writeTool)
   registry.register(patchTool)
   registry.register(diffPatchTool)
+  registry.register(applyPatchTool)
   registry.register(deleteTool)
   registry.register(bashTool)
   registry.register(grepTool)
   registry.register(globTool)
   registry.register(listTool)
   registry.register(questionTool)
+  registry.register(webFetchTool)
+  registry.register(webSearchTool)
+  registry.register(createLspTool(opts.lspClient ?? new NoOpLSPClient()))
+
+  // Session-scoped todowrite tool — persists todos per session.
+  registry.register(
+    createTodowriteTool({
+      getTodos: () => getTodos(sessionRef.current),
+      updateTodos: (todos: TodoItem[]) => updateTodos(sessionRef.current, todos),
+    }),
+  )
+
+  // Plan exit tool — signals plan completion and asks user to switch to build mode.
+  registry.register(planExitTool)
+
+  // Register skill tool (needs cwd for skill discovery)
+  registry.register(createSkillTool(opts.cwd))
 
   // Register caller-provided extra tools (LSP, MCP, custom, plugins, etc.)
   if (opts.extraTools) {
@@ -162,11 +216,35 @@ export async function createAgent(opts: AgentFactoryOptions): Promise<AgentFacto
     qualityMonitor,
     onStreamEvent: opts.onStreamEvent,
     onIteration: (session, iteration) => {
+      // Keep session ref current for session-scoped tools (todowrite).
+      sessionRef.current = session.id
       fileChangesRef.changes = session.fileChanges
+
+      // Git snapshot tracking (fire-and-forget, matches OpenCode's async snapshot pattern).
+      // Snapshot after each iteration so the session has a revert point for every step.
+      const snapshotService = getSnapshotService()
+      snapshotService.track(opts.cwd).then((hash) => {
+        if (hash) {
+          if (!session.snapshots) session.snapshots = {}
+          session.snapshots[iteration] = hash
+        }
+      }).catch(() => {
+        // Snapshot failure is non-fatal — the loop continues without a revert point.
+      })
+
       opts.onIteration?.(session, iteration)
     },
     onAskUser: opts.onAskUser,
   })
+
+  // Wrap run() to set the session ID before the first tool execution.
+  // onIteration fires AFTER tool calls, so without this wrapper the first
+  // iteration's tool calls (e.g., todowrite) see an empty session ID.
+  const rawRun = loop.run.bind(loop)
+  loop.run = async (req) => {
+    sessionRef.current = req.session.id
+    return rawRun(req)
+  }
 
   // Semantic search tool (wraps SCE for model-callable code search)
   registry.register(createSearchTool({ sce, cwd: opts.cwd }))
@@ -183,6 +261,16 @@ export async function createAgent(opts: AgentFactoryOptions): Promise<AgentFacto
   // Bootstrap
   const bootstrap = detectProject(opts.cwd)
 
+  // Skill discovery — preloads for the skill tool.
+  // The discovered skills are available via the "skill" tool at runtime.
+  // Skill list is also appended to the bootstrap summary so the model
+  // knows which skills are available before making tool calls.
+  const skillsPromptBlock = formatSkillsForPrompt(discoverSkills(opts.cwd))
+  const bootstrapSummary = [
+    bootstrap.summary,
+    skillsPromptBlock,
+  ].filter(Boolean).join("\n\n")
+
   // Activate plugins from config (post-registry setup, so plugins can use all tools).
   // Await activation so plugins are guaranteed loaded before the agent runs.
   const plugins = opts.config.plugin
@@ -194,6 +282,13 @@ export async function createAgent(opts: AgentFactoryOptions): Promise<AgentFacto
     }
   }
 
+  // Background jobs: session cleanup, MCP heartbeats, stale lock cleanup.
+  const backgroundJobs = startBackgroundJobs({
+    cwd: opts.cwd,
+    store: opts.store,
+    config: opts.config,
+  })
+
   return {
     loop,
     registry,
@@ -201,7 +296,9 @@ export async function createAgent(opts: AgentFactoryOptions): Promise<AgentFacto
     tokenizer: opts.tokenizer,
     config: opts.config,
     dispose: async () => {
-      // Deactivate plugins first, then caller-provided disposers.
+      // Stop background jobs first.
+      backgroundJobs.stop()
+      // Deactivate plugins, then caller-provided disposers.
       try {
         await deactivateAllPlugins()
       } catch (err) {
@@ -212,8 +309,10 @@ export async function createAgent(opts: AgentFactoryOptions): Promise<AgentFacto
           await d()
         }
       }
+      // Clean up session todo state if a session ran.
+      if (sessionRef.current) clearTodos(sessionRef.current)
     },
     fileChangesRef,
-    bootstrapSummary: bootstrap.summary || "",
+    bootstrapSummary,
   }
 }
