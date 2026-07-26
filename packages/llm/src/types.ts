@@ -54,6 +54,8 @@ export interface LLMRequest {
   system: string
   messages: LLMMessage[]
   tools?: LLMToolSpec[]
+  /** Optional temperature override (provider-specific semantics). */
+  temperature?: number
 }
 
 export type LLMResponse =

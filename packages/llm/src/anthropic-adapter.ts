@@ -76,6 +76,7 @@ export class AnthropicClient implements LLMClient {
               continue
             }
           }
+          // Non-retryable errors: throw immediately.
           throw new Error(`Anthropic API error ${response.status}: ${errText}`)
         }
 
@@ -124,8 +125,9 @@ export class AnthropicClient implements LLMClient {
   }
 
   async completeStream(req: LLMRequest): Promise<LLMStream> {
-    // Capture apiKey before the generator to avoid `this` binding issues.
+    // Capture values before the generator to avoid `this` binding issues.
     const apiKey = this.apiKey
+    const model = this.model
 
     // Filter system messages from the array — Anthropic uses a top-level system param.
     const systemMessages = req.messages.filter((m) => m.role === "system")
@@ -160,7 +162,7 @@ export class AnthropicClient implements LLMClient {
             "anthropic-version": "2023-06-01",
           },
           body: JSON.stringify({
-            model: req.model,
+            model: model,
             system: systemPrompt || undefined,
             messages,
             tools: tools?.length ? tools : undefined,

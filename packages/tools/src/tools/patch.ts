@@ -41,7 +41,7 @@ export const patchTool: Tool<{ patched: boolean }> = {
       }
       const after = before.replace(
         new RegExp(oldText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"),
-        newText.replace(/\$/g, "$$$"),
+        () => newText,
       )
       await writeFile(abs, after, "utf8")
       // Auto-format after patch if a matching formatter is available.

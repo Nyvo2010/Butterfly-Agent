@@ -140,17 +140,33 @@ export async function connectMCPServer(
   config: ButterflyMCPConfig,
   defaultKind?: Tool["kind"],
 ): Promise<Tool[]> {
-  const sdk = await loadMCPSDK()
-  const transport = createTransport(sdk, config)
-  const client = createMCPClient(sdk, transport)
-  await client.connect(transport)
+  let transport: unknown = null
+  try {
+    const sdk = await loadMCPSDK()
+    transport = createTransport(sdk, config)
+    const client = createMCPClient(sdk, transport)
+    await client.connect(transport)
 
-  const { tools } = await client.listTools()
-  const kind = defaultKind ?? "exec"
-  const wrapped = tools.map((t) => wrapMCPTool(name, t, kind))
+    const { tools } = await client.listTools()
+    const kind = defaultKind ?? "exec"
+    const wrapped = tools.map((t) => wrapMCPTool(name, t, kind))
 
-  connections.set(name, { name, client, transport, tools: wrapped })
-  return wrapped
+    connections.set(name, { name, client, transport, tools: wrapped })
+    return wrapped
+  } catch (err) {
+    // Clean up the transport/process on connection failure to prevent leaks.
+    if (transport) {
+      try {
+        const t = transport as { close?: () => Promise<void>; stop?: () => void }
+        if (t.close) await t.close()
+        else if (t.stop) t.stop()
+      } catch {
+        // Best-effort cleanup
+      }
+    }
+    connections.delete(name)
+    throw err
+  }
 }
 
 export async function connectAllMCPServers(

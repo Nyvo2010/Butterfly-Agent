@@ -342,7 +342,7 @@ export class AgentLoop {
 
       // Step 9: Escalation + plan update on success
       if (req.plan && !iterState.stepHadFailure) {
-        this.updatePlanFromResults(req.plan, response.calls)
+        this.updatePlanFromResults(req.plan, response.calls, iterState.callResults)
       }
 
       // Abort check
@@ -742,7 +742,12 @@ export class AgentLoop {
     workspaceRoots: string[],
     iterState: IterationState,
   ): Promise<{ kind: "ok"; output: unknown } | { kind: "err"; message: string }> {
-    const ctx = { cwd: req.cwd, onAskUser: this.deps.onAskUser, workspaceRoots }
+    const ctx = {
+      cwd: req.cwd,
+      onAskUser: this.deps.onAskUser,
+      workspaceRoots,
+      subagentDepth: req.subagentDepth ?? 0,
+    }
     const isMutationTool = tool.kind === "write" || tool.kind === "exec"
 
     if (!isMutationTool) {
@@ -875,11 +880,14 @@ export class AgentLoop {
   private updatePlanFromResults(
     plan: Plan,
     calls: Array<{ id: string; name: string; input: unknown }>,
+    callResults: CallResult[],
   ): void {
     for (const call of calls) {
       const tool = this.deps.registry.get(call.name)
       if (tool && (toolMatchesFileMutation(tool) || isSubagentTool(call.name))) {
-        updatePlanFromToolResult(plan, call.name, asRecord(call.input), true)
+        const cr = callResults.find((r) => r.call.id === call.id)
+        const success = cr ? !cr.error : false
+        updatePlanFromToolResult(plan, call.name, asRecord(call.input), success)
       }
     }
   }
@@ -1012,7 +1020,9 @@ function looksLikePlan(text: string): boolean {
 function estimateTotalTokens(session: SessionState): number {
   let charSum = 0
   for (const m of session.messages) charSum += m.content.length
-  return Math.ceil(charSum / 4)
+  for (const tc of session.toolCalls) charSum += JSON.stringify(tc).length
+  // Conservative estimate: ~3 chars per token for code-heavy content.
+  return Math.ceil(charSum / 3)
 }
 
 function sessionHasBootstrap(session: SessionState): boolean {

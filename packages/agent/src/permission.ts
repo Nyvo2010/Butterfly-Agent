@@ -33,11 +33,12 @@ export function buildPermissionHook(
   const bashRules = config.bash ?? {}
 
   return async (toolName, input) => {
-    // File mutation tools: write, patch, diff_patch, delete, rollback
+    // File mutation tools: write, patch, diff_patch, delete, rollback, apply_patch
     if (
       toolName === "write" ||
       toolName === "patch" ||
       toolName === "diff_patch" ||
+      toolName === "apply_patch" ||
       toolName === "delete" ||
       toolName === "rollback"
     ) {

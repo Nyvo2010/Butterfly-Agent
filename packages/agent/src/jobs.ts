@@ -55,12 +55,16 @@ export function startBackgroundJobs(opts: BackgroundJobsOptions): BackgroundJobs
         for (const entry of sessionEntries) {
           try {
             const updatedAt = new Date(entry.updatedAt).getTime()
+            if (Number.isNaN(updatedAt)) continue
             if (updatedAt < staleThreshold) {
               await opts.store.delete(entry.id)
               cleaned++
             }
-          } catch {
-            // Individual session errors are non-fatal.
+          } catch (err) {
+            log(
+              "warn",
+              `[background] failed to clean session ${entry.id}: ${(err as Error).message}`,
+            )
           }
         }
         if (cleaned > 0) {
@@ -68,15 +72,18 @@ export function startBackgroundJobs(opts: BackgroundJobsOptions): BackgroundJobs
         }
       }
     } catch (err) {
-      // Background job errors are non-fatal — log and continue.
       log("warn", `[background] job error: ${(err as Error).message}`)
     }
   }
 
   // Run immediately on start, then on interval.
-  run().catch(() => {})
+  run().catch((err) => {
+    log("warn", `[background] initial run error: ${(err as Error).message}`)
+  })
   timer = setInterval(() => {
-    run().catch(() => {})
+    run().catch((err) => {
+      log("warn", `[background] interval run error: ${(err as Error).message}`)
+    })
   }, intervalMs)
 
   // Don't prevent the Node.js process from exiting just because

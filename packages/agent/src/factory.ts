@@ -45,7 +45,6 @@ import {
   type ToolRegistry,
   ToolRegistry as ToolRegistryClass,
   webFetchTool,
-  webSearchTool,
   writeTool,
 } from "@butterfly/tools"
 import { startBackgroundJobs } from "./jobs"
@@ -179,7 +178,6 @@ export async function createAgent(opts: AgentFactoryOptions): Promise<AgentFacto
   registry.register(listTool)
   registry.register(questionTool)
   registry.register(webFetchTool)
-  registry.register(webSearchTool)
   registry.register(createLspTool((opts.lspClient ?? new NoOpLSPClient()) as LSPClientLike))
 
   // Session-scoped todowrite tool — persists todos per session via the mutable ref.
@@ -279,8 +277,13 @@ export async function createAgent(opts: AgentFactoryOptions): Promise<AgentFacto
             session.snapshots[iteration] = hash
           }
         })
-        .catch(() => {
+        .catch((err) => {
           // Snapshot failure is non-fatal — the loop continues without a revert point.
+          // Log at warn level so operators can investigate persistent snapshot failures.
+          log(
+            "warn",
+            `[factory] Snapshot failed for iteration ${iteration}: ${(err as Error).message}`,
+          )
         })
 
       opts.onIteration?.(session, iteration)

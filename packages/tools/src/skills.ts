@@ -37,10 +37,12 @@ let state: SkillState | null = null
 
 /**
  * Discover and load all skills from configured directories.
+ * Caches results; call resetSkills() to invalidate the cache.
+ * Project skills override global skills with the same name.
  */
 export function discoverSkills(cwd: string): SkillInfo[] {
-  if (state) return Array.from(state.skills.values())
-
+  // Always re-scan to pick up new/removed skills and ensure project
+  // skills correctly override global ones for the current working directory.
   state = { skills: new Map(), dirs: new Set() }
 
   const dirs = [

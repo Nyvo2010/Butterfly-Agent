@@ -63,6 +63,74 @@ export interface ProviderSummary {
   env?: string[]
 }
 
+// ─── Provider defaults ───────────────────────────────────────────────────────
+
+/** Well-known provider entries shared by listProviders() and listProvidersSync(). */
+const DEFAULT_PROVIDER_ENTRIES: Array<{
+  id: string
+  name: string
+  provider: string
+  env: string[]
+}> = [
+  { id: "anthropic", name: "Anthropic", provider: "anthropic", env: ["ANTHROPIC_API_KEY"] },
+  {
+    id: "google",
+    name: "Google Gemini",
+    provider: "google",
+    env: ["GOOGLE_GENERATIVE_AI_API_KEY"],
+  },
+  { id: "openai", name: "OpenAI", provider: "openai", env: ["OPENAI_API_KEY"] },
+  { id: "deepseek", name: "DeepSeek", provider: "deepseek", env: ["DEEPSEEK_API_KEY"] },
+  { id: "groq", name: "Groq", provider: "groq", env: ["GROQ_API_KEY"] },
+  { id: "xai", name: "xAI", provider: "xai", env: ["XAI_API_KEY"] },
+  { id: "openrouter", name: "OpenRouter", provider: "openrouter", env: ["OPENROUTER_API_KEY"] },
+  { id: "mistral", name: "Mistral", provider: "mistral", env: ["MISTRAL_API_KEY"] },
+  { id: "cohere", name: "Cohere", provider: "cohere", env: ["COHERE_API_KEY"] },
+  { id: "perplexity", name: "Perplexity", provider: "perplexity", env: ["PERPLEXITY_API_KEY"] },
+  { id: "cerebras", name: "Cerebras", provider: "cerebras", env: ["CEREBRAS_API_KEY"] },
+  { id: "fireworks", name: "Fireworks", provider: "fireworks", env: ["FIREWORKS_API_KEY"] },
+  { id: "togetherai", name: "Together AI", provider: "togetherai", env: ["TOGETHER_API_KEY"] },
+]
+
+/** Additional providers only surfaced in the sync (always-on) listing. */
+const EXTENDED_PROVIDER_ENTRIES: Array<{
+  id: string
+  name: string
+  provider: string
+  env: string[]
+}> = [
+  { id: "azure", name: "Azure OpenAI", provider: "azure", env: ["AZURE_OPENAI_API_KEY"] },
+  {
+    id: "amazon-bedrock",
+    name: "Amazon Bedrock",
+    provider: "amazon-bedrock",
+    env: ["AWS_ACCESS_KEY_ID"],
+  },
+  {
+    id: "github-copilot",
+    name: "GitHub Copilot",
+    provider: "github-copilot",
+    env: ["GITHUB_TOKEN"],
+  },
+  { id: "cloudflare", name: "Cloudflare", provider: "cloudflare", env: ["CLOUDFLARE_API_KEY"] },
+]
+
+/** Build a ProviderSummary from a default entry, enriching with catalog data when available. */
+function toProviderSummary(
+  entry: { id: string; name: string; provider: string; env: string[] },
+  catalogName?: string,
+  catalogEnv?: string[],
+): ProviderSummary {
+  return {
+    id: entry.id,
+    name: catalogName ?? entry.name,
+    provider: entry.provider,
+    prefix: `${entry.id}/`,
+    modelCount: (WELL_KNOWN_MODELS[entry.id] ?? []).length || 1,
+    env: catalogEnv ?? entry.env,
+  }
+}
+
 // ─── Provider Service ─────────────────────────────────────────────────────────
 
 export class ProviderService {
@@ -210,39 +278,10 @@ export class ProviderService {
         })
     }
 
-    // Fallback: legacy env-var-based defaults
-    const envDefaults = [
-      { id: "anthropic", name: "Anthropic", provider: "anthropic", env: ["ANTHROPIC_API_KEY"] },
-      {
-        id: "google",
-        name: "Google Gemini",
-        provider: "google",
-        env: ["GOOGLE_GENERATIVE_AI_API_KEY"],
-      },
-      { id: "openai", name: "OpenAI", provider: "openai", env: ["OPENAI_API_KEY"] },
-      { id: "deepseek", name: "DeepSeek", provider: "deepseek", env: ["DEEPSEEK_API_KEY"] },
-      { id: "groq", name: "Groq", provider: "groq", env: ["GROQ_API_KEY"] },
-      { id: "xai", name: "xAI", provider: "xai", env: ["XAI_API_KEY"] },
-      { id: "openrouter", name: "OpenRouter", provider: "openrouter", env: ["OPENROUTER_API_KEY"] },
-      { id: "mistral", name: "Mistral", provider: "mistral", env: ["MISTRAL_API_KEY"] },
-      { id: "cohere", name: "Cohere", provider: "cohere", env: ["COHERE_API_KEY"] },
-      { id: "perplexity", name: "Perplexity", provider: "perplexity", env: ["PERPLEXITY_API_KEY"] },
-      { id: "cerebras", name: "Cerebras", provider: "cerebras", env: ["CEREBRAS_API_KEY"] },
-      { id: "fireworks", name: "Fireworks", provider: "fireworks", env: ["FIREWORKS_API_KEY"] },
-      { id: "togetherai", name: "Together AI", provider: "togetherai", env: ["TOGETHER_API_KEY"] },
-    ]
-
-    // Enrich with catalog data when available.
-    return envDefaults.map((d) => {
+    // Fallback: legacy env-var-based defaults.
+    return DEFAULT_PROVIDER_ENTRIES.map((d) => {
       const cat = catalogProviderMap.get(d.id)
-      return {
-        id: d.id,
-        name: cat?.name ?? d.name,
-        provider: d.provider,
-        prefix: `${d.id}/`,
-        modelCount: (WELL_KNOWN_MODELS[d.id] ?? []).length || 1,
-        env: cat?.env ?? d.env,
-      }
+      return toProviderSummary(d, cat?.name, cat?.env)
     })
   }
 
@@ -250,144 +289,8 @@ export class ProviderService {
    * Synchronous version of listProviders() for non-async contexts.
    */
   listProvidersSync(): ProviderSummary[] {
-    return [
-      {
-        id: "anthropic",
-        name: "Anthropic",
-        provider: "anthropic",
-        prefix: "anthropic/",
-        modelCount: (WELL_KNOWN_MODELS.anthropic ?? []).length,
-        env: ["ANTHROPIC_API_KEY"],
-      },
-      {
-        id: "openai",
-        name: "OpenAI",
-        provider: "openai",
-        prefix: "openai/",
-        modelCount: (WELL_KNOWN_MODELS.openai ?? []).length,
-        env: ["OPENAI_API_KEY"],
-      },
-      {
-        id: "google",
-        name: "Google Gemini",
-        provider: "google",
-        prefix: "google/",
-        modelCount: (WELL_KNOWN_MODELS.google ?? []).length,
-        env: ["GOOGLE_GENERATIVE_AI_API_KEY"],
-      },
-      {
-        id: "deepseek",
-        name: "DeepSeek",
-        provider: "deepseek",
-        prefix: "deepseek/",
-        modelCount: (WELL_KNOWN_MODELS.deepseek ?? []).length,
-        env: ["DEEPSEEK_API_KEY"],
-      },
-      {
-        id: "groq",
-        name: "Groq",
-        provider: "groq",
-        prefix: "groq/",
-        modelCount: (WELL_KNOWN_MODELS.groq ?? []).length,
-        env: ["GROQ_API_KEY"],
-      },
-      {
-        id: "xai",
-        name: "xAI",
-        provider: "xai",
-        prefix: "xai/",
-        modelCount: (WELL_KNOWN_MODELS.xai ?? []).length,
-        env: ["XAI_API_KEY"],
-      },
-      {
-        id: "openrouter",
-        name: "OpenRouter",
-        provider: "openrouter",
-        prefix: "openrouter/",
-        modelCount: (WELL_KNOWN_MODELS.openrouter ?? []).length,
-        env: ["OPENROUTER_API_KEY"],
-      },
-      {
-        id: "mistral",
-        name: "Mistral",
-        provider: "mistral",
-        prefix: "mistral/",
-        modelCount: (WELL_KNOWN_MODELS.mistral ?? []).length,
-        env: ["MISTRAL_API_KEY"],
-      },
-      {
-        id: "cohere",
-        name: "Cohere",
-        provider: "cohere",
-        prefix: "cohere/",
-        modelCount: (WELL_KNOWN_MODELS.cohere ?? []).length,
-        env: ["COHERE_API_KEY"],
-      },
-      {
-        id: "perplexity",
-        name: "Perplexity",
-        provider: "perplexity",
-        prefix: "perplexity/",
-        modelCount: (WELL_KNOWN_MODELS.perplexity ?? []).length,
-        env: ["PERPLEXITY_API_KEY"],
-      },
-      {
-        id: "cerebras",
-        name: "Cerebras",
-        provider: "cerebras",
-        prefix: "cerebras/",
-        modelCount: (WELL_KNOWN_MODELS.cerebras ?? []).length,
-        env: ["CEREBRAS_API_KEY"],
-      },
-      {
-        id: "fireworks",
-        name: "Fireworks",
-        provider: "fireworks",
-        prefix: "fireworks/",
-        modelCount: (WELL_KNOWN_MODELS.fireworks ?? []).length,
-        env: ["FIREWORKS_API_KEY"],
-      },
-      {
-        id: "togetherai",
-        name: "Together AI",
-        provider: "togetherai",
-        prefix: "togetherai/",
-        modelCount: (WELL_KNOWN_MODELS.togetherai ?? []).length,
-        env: ["TOGETHER_API_KEY"],
-      },
-      {
-        id: "azure",
-        name: "Azure OpenAI",
-        provider: "azure",
-        prefix: "azure/",
-        modelCount: (WELL_KNOWN_MODELS.azure ?? []).length,
-        env: ["AZURE_OPENAI_API_KEY"],
-      },
-      {
-        id: "amazon-bedrock",
-        name: "Amazon Bedrock",
-        provider: "amazon-bedrock",
-        prefix: "amazon-bedrock/",
-        modelCount: (WELL_KNOWN_MODELS["amazon-bedrock"] ?? []).length,
-        env: ["AWS_ACCESS_KEY_ID"],
-      },
-      {
-        id: "github-copilot",
-        name: "GitHub Copilot",
-        provider: "github-copilot",
-        prefix: "github-copilot/",
-        modelCount: (WELL_KNOWN_MODELS["github-copilot"] ?? []).length,
-        env: ["GITHUB_TOKEN"],
-      },
-      {
-        id: "cloudflare",
-        name: "Cloudflare",
-        provider: "cloudflare",
-        prefix: "cloudflare/",
-        modelCount: (WELL_KNOWN_MODELS.cloudflare ?? []).length,
-        env: ["CLOUDFLARE_API_KEY"],
-      },
-    ]
+    const allEntries = [...DEFAULT_PROVIDER_ENTRIES, ...EXTENDED_PROVIDER_ENTRIES]
+    return allEntries.map((d) => toProviderSummary(d))
   }
 
   /** Clear the client cache. */

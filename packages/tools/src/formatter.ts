@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process"
+import { execFileSync } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 
@@ -88,7 +88,7 @@ export function formatFile(cwd: string, filePath: string): boolean {
 
     try {
       const cmdArgs = args.map((a) => (a === "$FILE" ? filePath : a))
-      execSync(cmdArgs.join(" "), { cwd, stdio: "ignore", timeout: 10_000 })
+      execFileSync(cmdArgs[0], cmdArgs.slice(1), { cwd, stdio: "ignore", timeout: 10_000 })
       return true
     } catch {
       // Formatter failed — skip silently
@@ -132,23 +132,34 @@ function hasPackageDepUp(cwd: string, dep: string): boolean {
 
 /** Find binary in PATH. */
 function which(name: string): string | null {
+  // Validate bin name to prevent shell injection
+  if (!/^[a-zA-Z0-9_.-]+$/.test(name) || name.length > 256) return null
   try {
-    const result = execSync(`which ${name}`, { stdio: "pipe", timeout: 2000 })
+    const result = execFileSync("which", [name], { stdio: "pipe", timeout: 2000 })
     return result.toString().trim() || null
   } catch {
     return null
   }
 }
 
+/** Validate a binary name to prevent path traversal. */
+function sanitizeBinName(name: string): string | null {
+  if (!name || name.includes("..") || name.includes("/") || name.includes("\\")) return null
+  if (!/^[a-zA-Z0-9_.@-]+$/.test(name) || name.length > 256) return null
+  return name
+}
+
 /** Find npm binary relative to project. Checks local node_modules first. */
 function npxWhich(name: string, cwd: string): string | null {
+  const safeName = sanitizeBinName(name)
+  if (!safeName) return null
   // Check local node_modules/.bin first — fast, no network.
-  const localBin = join(cwd, "node_modules", ".bin", name)
+  const localBin = join(cwd, "node_modules", ".bin", safeName)
   if (existsSync(localBin)) return localBin
 
   // Fall back to npx for global or cached packages.
   try {
-    const result = execSync(`npx --yes ${name} --version`, {
+    const result = execFileSync("npx", ["--yes", safeName, "--version"], {
       cwd,
       stdio: "pipe",
       timeout: 5000,

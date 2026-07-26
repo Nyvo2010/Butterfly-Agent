@@ -122,6 +122,9 @@ export async function activatePlugin(
     log("info", `[plugin] Activated: ${config.name}`)
   } catch (err) {
     log("error", `[plugin] Failed to activate ${config.name}: ${(err as Error).message}`)
+    // Re-throw so callers know a plugin failed to activate rather than silently skipping it.
+    // Callers (like the factory) can catch and decide whether to continue or abort.
+    throw err
   }
 }
 

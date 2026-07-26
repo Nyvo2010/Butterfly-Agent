@@ -44,10 +44,13 @@ function sendStreamChunk(
 
 // ─── ACP Agent Implementation ────────────────────────────────────────────────
 
+const MAX_SESSIONS = 50
+
 interface ACPSession {
   session: SessionState
   cwd: string
   mode: "plan" | "build"
+  abortController: AbortController
 }
 
 export interface ButterflyACPOptions {
@@ -85,8 +88,33 @@ export function createButterflyACP(
     return agentPromise
   }
 
-  // Session store
+  // Session store with bounded size.
   const sessions = new Map<string, ACPSession>()
+
+  /** Evict oldest session when the map exceeds MAX_SESSIONS. */
+  function evictOldest(): void {
+    if (sessions.size <= MAX_SESSIONS) return
+    let oldestId: string | null = null
+    let oldestTime = ""
+    for (const [id, s] of sessions) {
+      if (!oldestId || s.session.updatedAt < oldestTime) {
+        oldestId = id
+        oldestTime = s.session.updatedAt
+      }
+    }
+    if (oldestId) {
+      // Abort any in-flight operation before evicting.
+      const evicted = sessions.get(oldestId)
+      if (evicted) {
+        try {
+          evicted.abortController.abort()
+        } catch {
+          /* ignore */
+        }
+      }
+      sessions.delete(oldestId)
+    }
+  }
 
   return {
     // ── initialize ────────────────────────────────────────────────────
@@ -104,7 +132,13 @@ export function createButterflyACP(
       // Use the shared SessionManager so the session is persisted and a
       // session.created event is emitted — consistent with the HTTP path.
       const session = await app.sessionManager.create({ mode: "build" })
-      sessions.set(session.id, { session, cwd: params.cwd ?? cwd, mode: "build" })
+      sessions.set(session.id, {
+        session,
+        cwd: params.cwd ?? cwd,
+        mode: "build",
+        abortController: new AbortController(),
+      })
+      evictOldest()
       log("info", "acp.new_session", { sessionId: session.id, cwd: params.cwd })
       return { sessionId: session.id }
     },
@@ -119,7 +153,9 @@ export function createButterflyACP(
         session: existing,
         cwd: params.cwd ?? cwd,
         mode: existing.mode,
+        abortController: new AbortController(),
       })
+      evictOldest()
       log("info", "acp.load_session", { sessionId: existing.id })
       return {}
     },
@@ -127,11 +163,15 @@ export function createButterflyACP(
     // ── setSessionMode ────────────────────────────────────────────────
     async setSessionMode(params) {
       const acpSession = sessions.get(params.sessionId)
-      if (acpSession) {
-        const mode = params.modeId as "plan" | "build"
-        acpSession.mode = mode
-        acpSession.session = { ...acpSession.session, mode }
+      if (!acpSession) throw new Error(`Session not found: ${params.sessionId}`)
+      const mode = params.modeId
+      if (mode !== "plan" && mode !== "build") {
+        throw new Error(`Invalid mode: ${mode}. Must be "plan" or "build".`)
       }
+      acpSession.mode = mode
+      acpSession.session = { ...acpSession.session, mode }
+      // Persist the mode change.
+      await app.sessionManager.save(acpSession.session)
     },
 
     // ── prompt ────────────────────────────────────────────────────────
@@ -145,7 +185,8 @@ export function createButterflyACP(
           mode: "build",
           id: sessionId ?? undefined,
         })
-        acpSession = { session, cwd, mode: "build" }
+        acpSession = { session, cwd, mode: "build", abortController: new AbortController() }
+        evictOldest()
         sessions.set(session.id, acpSession)
       }
 
@@ -188,6 +229,7 @@ export function createButterflyACP(
               }
             : undefined,
           bootstrapSummary: agent.bootstrapSummary || undefined,
+          signal: acpSession.abortController.signal,
         })
 
         // Update stored session for multi-turn (via the shared session manager)
@@ -220,6 +262,18 @@ export function createButterflyACP(
         }
       } catch (err) {
         log("error", "acp.prompt_error", { error: (err as Error).message })
+        // Send error as a stream chunk so the client can display it.
+        if (connection) {
+          try {
+            await sendStreamChunk(
+              connection,
+              acpSession?.session?.id ?? sessionId,
+              `Error: ${(err as Error).message}`,
+            )
+          } catch {
+            /* best-effort */
+          }
+        }
         return { stopReason: "end_turn" }
       }
     },
@@ -232,8 +286,18 @@ export function createButterflyACP(
     },
 
     // ── cancel ────────────────────────────────────────────────────────
-    async cancel(_params) {
-      log("info", "acp.cancel")
+    async cancel(params) {
+      log("info", "acp.cancel", { sessionId: params.sessionId })
+      const acpSession = sessions.get(params.sessionId)
+      if (acpSession) {
+        try {
+          acpSession.abortController.abort()
+        } catch {
+          /* ignore */
+        }
+        // Create a fresh abort controller for future prompts.
+        acpSession.abortController = new AbortController()
+      }
     },
   }
 }

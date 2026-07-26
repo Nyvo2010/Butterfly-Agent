@@ -9,7 +9,7 @@ import { type ChildProcess, spawn } from "node:child_process"
 import { randomBytes } from "node:crypto"
 import { mkdir, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import type { Tool } from "../types"
 
 const DEFAULT_TIMEOUT_MS = 2 * 60 * 1000 // 2 minutes, matching OpenCode default
@@ -251,7 +251,20 @@ export const bashTool: Tool<{ stdout: string; stderr: string; exitCode: number }
         ? Number(input.timeout)
         : DEFAULT_TIMEOUT_MS
 
-    const workdir = typeof input.workdir === "string" && input.workdir ? input.workdir : ctx.cwd
+    // Validate workdir against workspace roots to prevent escape.
+    const rawWorkdir = typeof input.workdir === "string" && input.workdir ? input.workdir : ctx.cwd
+    const workdir = resolve(rawWorkdir)
+    if (ctx.workspaceRoots?.length) {
+      const allowed = ctx.workspaceRoots.some(
+        (root) => workdir === resolve(root) || workdir.startsWith(resolve(root) + "/"),
+      )
+      if (!allowed) {
+        return {
+          kind: "err",
+          message: `access denied: workdir "${rawWorkdir}" is outside the workspace`,
+        }
+      }
+    }
 
     const env = mergeEnv(ctx.env)
 

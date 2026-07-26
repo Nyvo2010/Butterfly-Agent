@@ -31,6 +31,7 @@ The server owns **all** agent logic, session state, and event broadcasting. The 
 - **Event bus**: Decoupled publish/subscribe system with 23 typed event kinds across 7 categories (session, run, stream, tool, file, permission, mcp). Multiple clients can watch one session.
 - **LLM-agnostic**: Works with any OpenAI-compatible API. Tiered model routing (trivial → standard → complex → escalate) with automatic escalation on tool failures.
 - **Filesystem tools**: Read, write, patch, delete, glob, grep, diff/patch, and directory listing with workspace-root path traversal protection.
+- **Web fetch tool**: Fetch content from URLs with SSRF protection (private IP blocking).
 - **LSP integration**: Go-to-definition, find references, and diagnostics via Language Server Protocol over stdio.
 - **MCP support**: Connect to Model Context Protocol servers (stdio or SSE/HTTP transport) for extended tool capabilities.
 - **Plugin system**: Opencode-compatible plugin architecture for custom tools and behaviors.

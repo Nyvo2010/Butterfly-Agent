@@ -36,7 +36,7 @@ pnpm build
 
 | Command | Description |
 |---------|-------------|
-| `pnpm test` | Run all tests (106+ tests) |
+| `pnpm test` | Run all tests (113+ tests) |
 | `pnpm test:watch` | Run tests in watch mode |
 | `pnpm typecheck` | Check TypeScript types across all packages |
 | `pnpm lint` | Lint all source files with Biome |

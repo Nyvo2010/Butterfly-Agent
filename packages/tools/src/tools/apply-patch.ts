@@ -1,5 +1,5 @@
-import { readFile, stat, writeFile } from "node:fs/promises"
-import { isAbsolute, resolve } from "node:path"
+import { mkdir, readFile, stat, writeFile, unlink } from "node:fs/promises"
+import { dirname, isAbsolute, resolve } from "node:path"
 import type { Tool, ToolContext, ToolResult } from "../types"
 import { isPathInWorkspace } from "../types"
 
@@ -117,6 +117,9 @@ async function applyFilePatch(
       // Extract content from the diff's + lines
       const content = extractAddedContent(pf.diff)
       try {
+        // Ensure parent directory exists.
+        const parent = dirname(abs)
+        await mkdir(parent, { recursive: true })
         await writeFile(abs, content, "utf8")
         return `Created ${pf.filePath}`
       } catch (err) {
@@ -142,9 +145,17 @@ async function applyFilePatch(
           : resolve(cwd, pf.movePath)
         : null
       if (!toAbs) return new Error("move requires a destination path")
+      // Validate destination is within workspace.
+      if (workspaceRoots && !(await isPathInWorkspace(toAbs, workspaceRoots))) {
+        return new Error(`access denied: ${pf.movePath} is outside the workspace`)
+      }
       try {
         const content = await readFile(fromAbs, "utf8")
+        const parent = dirname(toAbs)
+        await mkdir(parent, { recursive: true })
         await writeFile(toAbs, content, "utf8")
+        // Delete source after successful copy.
+        await unlink(fromAbs)
         return `Moved ${pf.filePath} → ${pf.movePath}`
       } catch (err) {
         return new Error(`Failed to move ${pf.filePath}: ${(err as Error).message}`)
@@ -153,7 +164,7 @@ async function applyFilePatch(
     case "update": {
       try {
         const original = await readFile(abs, "utf8")
-        const patched = applySimplePatch(original, pf.diff)
+        const patched = applyLineBasedPatch(original, pf.diff)
         if (patched instanceof Error) return patched
         await writeFile(abs, patched, "utf8")
         return `Updated ${pf.filePath}`
@@ -173,51 +184,72 @@ function extractAddedContent(diff: string): string {
     .join("\n")
 }
 
-/** Simple line-by-line patch application */
-function applySimplePatch(_original: string, diff: string): string | Error {
+/** Line-based patch application that uses the original file content as a base. */
+function applyLineBasedPatch(original: string, diff: string): string | Error {
+  const originalLines = original.split("\n")
   const diffLines = diff.split("\n")
-  let i = 0
   const output: string[] = []
+  let diffIdx = 0
+  let origIdx = 0
 
-  while (i < diffLines.length) {
-    const line = diffLines[i]
+  while (diffIdx < diffLines.length) {
+    const line = diffLines[diffIdx]
 
     // File headers — skip
     if (
       line.startsWith("diff ") ||
       line.startsWith("index ") ||
       line.startsWith("--- ") ||
-      line.startsWith("+++ ") ||
-      line.startsWith("@@")
+      line.startsWith("+++ ")
     ) {
-      i++
+      diffIdx++
       continue
     }
 
-    // Context line or unchanged
-    if (line.startsWith(" ") || (!line.startsWith("+") && !line.startsWith("-"))) {
-      const ctx = line.startsWith(" ") ? line.slice(1) : line
-      output.push(ctx)
-      i++
+    // Hunk header: parse to find original line and count.
+    if (line.startsWith("@@")) {
+      const match = line.match(/@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/)
+      if (match) {
+        const origStart = Number.parseInt(match[1], 10) - 1 // 0-based
+        // Copy lines from original up to the hunk start.
+        while (origIdx < origStart && origIdx < originalLines.length) {
+          output.push(originalLines[origIdx])
+          origIdx++
+        }
+      }
+      diffIdx++
       continue
     }
 
-    // Removed line — skip
+    // Context line
+    if (line.startsWith(" ")) {
+      output.push(line.slice(1))
+      origIdx++
+      diffIdx++
+      continue
+    }
+
+    // Removed line
     if (line.startsWith("-")) {
-      i++
-      // Skip consecutive removals
-      while (i < diffLines.length && diffLines[i].startsWith("-")) i++
+      origIdx++
+      diffIdx++
       continue
     }
 
     // Added line
     if (line.startsWith("+")) {
       output.push(line.slice(1))
-      i++
+      diffIdx++
       continue
     }
 
-    i++
+    diffIdx++
+  }
+
+  // Copy remaining original lines.
+  while (origIdx < originalLines.length) {
+    output.push(originalLines[origIdx])
+    origIdx++
   }
 
   return output.join("\n")

@@ -119,12 +119,19 @@ export class SQLiteSessionStore implements SessionStore {
       const stmt = db.prepare("SELECT data FROM sessions WHERE id = ?")
       const row = stmt.get(id) as { data: string } | undefined
       if (!row) return null
-      const parsed = JSON.parse(row.data) as SessionState
-      if (!parsed || typeof parsed !== "object" || !parsed.id) {
+      const parsed = JSON.parse(row.data)
+      // Validate that the parsed data looks like a valid SessionState.
+      if (
+        !parsed ||
+        typeof parsed !== "object" ||
+        typeof parsed.id !== "string" ||
+        typeof parsed.mode !== "string" ||
+        !Array.isArray(parsed.messages)
+      ) {
         this.onError(`[SQLiteStore] Corrupt session data for ${id}`)
         return null
       }
-      return parsed
+      return parsed as SessionState
     } catch (err) {
       this.onError(`[SQLiteStore] Failed to load session ${id}: ${err}`)
       return null
@@ -136,11 +143,25 @@ export class SQLiteSessionStore implements SessionStore {
       throw new Error("SQLiteSessionStore.save: state.id is required")
     }
     try {
+      // Guard against excessively large sessions that could OOM or
+      // produce multi-MB JSON blobs. 50MB is a generous ceiling for
+      // long-running sessions with many tool calls.
+      const MAX_SESSION_JSON_BYTES = 50 * 1024 * 1024
+      const now = new Date().toISOString()
+      // Sync updatedAt in both the JSON blob and the DB column.
+      const synced = { ...state, updatedAt: now }
+      const serialized = JSON.stringify(synced)
+      if (Buffer.byteLength(serialized, "utf8") > MAX_SESSION_JSON_BYTES) {
+        throw new Error(
+          `Session ${state.id} exceeds ${MAX_SESSION_JSON_BYTES / (1024 * 1024)}MB limit. ` +
+            `Consider starting a new session.`,
+        )
+      }
       const db = await this.ensureInit()
       const stmt = db.prepare(
-        "INSERT OR REPLACE INTO sessions (id, data, updated_at) VALUES (?, ?, datetime('now'))",
+        "INSERT OR REPLACE INTO sessions (id, data, updated_at) VALUES (?, ?, ?)",
       )
-      stmt.run(state.id, JSON.stringify(state))
+      stmt.run(synced.id, serialized, now)
     } catch (err) {
       this.onError(`[SQLiteStore] Failed to save session ${state.id}: ${err}`)
       throw err

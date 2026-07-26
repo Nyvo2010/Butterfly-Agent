@@ -53,8 +53,10 @@ function queryToRegex(query: string): RegExp {
   if (query.trim() === "") {
     return /$.^/
   }
+  // Use Unicode-aware regex to handle non-ASCII identifiers (e.g., Chinese, Cyrillic, Arabic).
+  // Matches sequences of 2+ Unicode letters, numbers, underscores, or hyphens.
   const tokens = [
-    ...new Set((query.match(/\b[\w-]{2,}\b/g) ?? []).map((t) => t.toLowerCase())),
+    ...new Set((query.match(/[\p{L}\p{N}_-]{2,}/gu) ?? []).map((t) => t.toLowerCase())),
   ].filter((t) => !STOP_WORDS.has(t))
   if (tokens.length === 0) {
     try {
@@ -76,7 +78,7 @@ function escapeRegex(s: string): string {
 
 function countMeaningfulTokens(query: string): number {
   const tokens = [
-    ...new Set((query.match(/\b[\w-]{3,}\b/g) ?? []).map((t) => t.toLowerCase())),
+    ...new Set((query.match(/[\p{L}\p{N}_-]{3,}/gu) ?? []).map((t) => t.toLowerCase())),
   ].filter((t) => !STOP_WORDS.has(t))
   return tokens.length
 }
@@ -236,7 +238,7 @@ export class SCE {
     // queryToRegex returns an alternation of escaped tokens (e.g., /resolve|model/im).
     // Ripgrep handles regex natively, so pass the alternation pattern directly.
     const tokens = [
-      ...new Set((query.match(/\b[\w-]{2,}\b/g) ?? []).map((t) => t.toLowerCase())),
+      ...new Set((query.match(/[\p{L}\p{N}_-]{2,}/gu) ?? []).map((t) => t.toLowerCase())),
     ].filter((t) => !STOP_WORDS.has(t))
 
     if (tokens.length === 0 && query.trim()) {

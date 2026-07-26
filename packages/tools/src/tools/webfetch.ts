@@ -1,6 +1,55 @@
+import { isIP } from "node:net"
 import type { Tool, ToolContext, ToolResult } from "../types"
 
 const MAX_RESPONSE_SIZE = 5 * 1024 * 1024 // 5MB
+
+const BLOCKED_HOSTS = new Set([
+  "localhost",
+  "127.0.0.1",
+  "0.0.0.0",
+  "[::1]",
+  "169.254.169.254", // AWS metadata
+  "metadata.google.internal", // GCP metadata
+])
+
+const BLOCKED_CIDR_PREFIXES = [
+  "10.",
+  "172.16.",
+  "172.17.",
+  "172.18.",
+  "172.19.",
+  "172.20.",
+  "172.21.",
+  "172.22.",
+  "172.23.",
+  "172.24.",
+  "172.25.",
+  "172.26.",
+  "172.27.",
+  "172.28.",
+  "172.29.",
+  "172.30.",
+  "172.31.",
+  "192.168.",
+]
+
+function isValidFetchUrl(urlStr: string): boolean {
+  try {
+    const parsed = new URL(urlStr)
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false
+    const hostname = parsed.hostname.toLowerCase()
+    if (BLOCKED_HOSTS.has(hostname)) return false
+    if (isIP(hostname)) {
+      if (hostname.startsWith("127.") || hostname === "0.0.0.0") return false
+      for (const prefix of BLOCKED_CIDR_PREFIXES) {
+        if (hostname.startsWith(prefix)) return false
+      }
+    }
+    return true
+  } catch {
+    return false
+  }
+}
 
 /**
  * WebFetch tool — fetches a URL and returns content as text, markdown, or HTML.
@@ -35,6 +84,7 @@ export const webFetchTool: Tool = {
   async execute(input: Record<string, unknown>, _ctx: ToolContext): Promise<ToolResult> {
     const url = String(input.url ?? "")
     if (!url) return { kind: "err", message: "URL is required" }
+    if (!isValidFetchUrl(url)) return { kind: "err", message: `URL blocked for security: ${url}` }
 
     const format = String(input.format ?? "markdown") as "text" | "markdown" | "html"
     const timeoutSec = Math.min(Number(input.timeout ?? 30), 120)

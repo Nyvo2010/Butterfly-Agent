@@ -533,7 +533,7 @@ export class StdioLSPClient implements LSPClient {
           this.timeoutIds.delete(id)
           reject(new Error(`LSP request ${method} timed out`))
         }
-      }, REQUEST_TIMEOUT_MS)
+      }, this.timeout)
       this.timeoutIds.set(id, timeoutId)
     })
   }

@@ -27,20 +27,28 @@ export class GeminiClient implements LLMClient {
   }
 
   async complete(req: LLMRequest): Promise<LLMResponse> {
-    const systemParts = req.system
-      ? [{ role: "user" as const, parts: [{ text: `[System] ${req.system}` }] }]
+    const model = req.model || this.model
+    const systemPrompt = req.system ?? ""
+
+    // Gemini does not support a native "system" role in the contents array.
+    // Embed system instructions as the first user message per Gemini docs.
+    const systemParts = systemPrompt
+      ? [{ role: "user" as const, parts: [{ text: `[System] ${systemPrompt}` }] }]
       : []
 
-    const messages = req.messages.map((m) => ({
-      role: m.role === "assistant" ? ("model" as const) : ("user" as const),
-      parts: [{ text: typeof m.content === "string" ? m.content : JSON.stringify(m.content) }],
-    }))
+    const messages = req.messages.map((m) => {
+      const role = m.role === "assistant" ? ("model" as const) : ("user" as const)
+      return {
+        role,
+        parts: [{ text: typeof m.content === "string" ? m.content : JSON.stringify(m.content) }],
+      }
+    })
 
-    // Combine system prompt with messages
+    // Combine system prompt with messages (system first, then user/model interleaved).
     const allMessages = [...systemParts, ...messages]
 
-    // Merge consecutive same-role messages
-    const merged: typeof allMessages = []
+    // Merge consecutive same-role messages (Gemini API requirement).
+    const merged: Array<{ role: string; parts: Array<{ text: string }> }> = []
     for (const msg of allMessages) {
       const last = merged[merged.length - 1]
       if (last && last.role === msg.role) {
@@ -62,17 +70,17 @@ export class GeminiClient implements LLMClient {
 
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${this.apiKey}`
         const response = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             contents: merged,
             tools: tools?.length ? tools : undefined,
-            generationConfig: {
-              temperature: 0.7,
-              maxOutputTokens: 4096,
-            },
+            generationConfig:
+              req.temperature !== undefined
+                ? { temperature: req.temperature, maxOutputTokens: 4096 }
+                : { maxOutputTokens: 4096 },
           }),
         })
 
@@ -84,6 +92,7 @@ export class GeminiClient implements LLMClient {
               continue
             }
           }
+          // Non-retryable errors: throw immediately.
           throw new Error(`Gemini API error ${response.status}: ${errText}`)
         }
 
@@ -157,15 +166,22 @@ export class GeminiClient implements LLMClient {
   }
 
   async completeStream(req: LLMRequest): Promise<LLMStream> {
-    // Capture apiKey before the generator to avoid `this` binding issues.
+    // Capture values before the generator to avoid `this` binding issues.
     const apiKey = this.apiKey
-    const systemParts = req.system
-      ? [{ role: "user" as const, parts: [{ text: `[System] ${req.system}` }] }]
+    const model = req.model || this.model
+    const systemPrompt: string = req.system ?? ""
+    // Gemini does not support a native "system" role in the contents array.
+    // Embed system instructions as the first user message per Gemini docs.
+    const systemParts = systemPrompt
+      ? [{ role: "user" as const, parts: [{ text: `[System] ${systemPrompt}` }] }]
       : []
-    const messages = req.messages.map((m) => ({
-      role: m.role === "assistant" ? ("model" as const) : ("user" as const),
-      parts: [{ text: typeof m.content === "string" ? m.content : JSON.stringify(m.content) }],
-    }))
+    const messages = req.messages.map((m) => {
+      const role = m.role === "assistant" ? ("model" as const) : ("user" as const)
+      return {
+        role,
+        parts: [{ text: typeof m.content === "string" ? m.content : JSON.stringify(m.content) }],
+      }
+    })
 
     // Merge consecutive same-role messages (Gemini requirement).
     const allMessages = [...systemParts, ...messages]
@@ -192,14 +208,17 @@ export class GeminiClient implements LLMClient {
     // eslint-disable-next-line require-yield
     return (async function* () {
       try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${req.model}:streamGenerateContent?alt=sse&key=${apiKey}`
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`
         const response = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             contents: merged,
             tools: tools?.length ? tools : undefined,
-            generationConfig: { temperature: 0.7, maxOutputTokens: 4096 },
+            generationConfig:
+              req.temperature !== undefined
+                ? { temperature: req.temperature, maxOutputTokens: 4096 }
+                : { maxOutputTokens: 4096 },
           }),
         })
 
