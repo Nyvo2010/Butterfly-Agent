@@ -5,11 +5,11 @@
  * timeout/abort support, and output size limits with file offload.
  */
 
-import { spawn, type ChildProcess } from "node:child_process"
+import { type ChildProcess, spawn } from "node:child_process"
+import { randomBytes } from "node:crypto"
 import { mkdir, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { randomBytes } from "node:crypto"
 import type { Tool } from "../types"
 
 const DEFAULT_TIMEOUT_MS = 2 * 60 * 1000 // 2 minutes, matching OpenCode default
@@ -122,7 +122,13 @@ function spawnCommand(
   env: Record<string, string>,
   timeoutMs: number,
   signal?: AbortSignal,
-): Promise<{ stdout: string; stderr: string; exitCode: number | null; killed: boolean; timedOut: boolean }> {
+): Promise<{
+  stdout: string
+  stderr: string
+  exitCode: number | null
+  killed: boolean
+  timedOut: boolean
+}> {
   return new Promise((resolve) => {
     const child: ChildProcess = spawn(command, {
       shell: true,
@@ -240,13 +246,12 @@ export const bashTool: Tool<{ stdout: string; stderr: string; exitCode: number }
       return { kind: "err", message: "Command contains shell metacharacters and was blocked." }
     }
 
-    const timeout = Number.isFinite(Number(input.timeout)) && Number(input.timeout) > 0
-      ? Number(input.timeout)
-      : DEFAULT_TIMEOUT_MS
+    const timeout =
+      Number.isFinite(Number(input.timeout)) && Number(input.timeout) > 0
+        ? Number(input.timeout)
+        : DEFAULT_TIMEOUT_MS
 
-    const workdir = typeof input.workdir === "string" && input.workdir
-      ? input.workdir
-      : ctx.cwd
+    const workdir = typeof input.workdir === "string" && input.workdir ? input.workdir : ctx.cwd
 
     const env = mergeEnv(ctx.env)
 

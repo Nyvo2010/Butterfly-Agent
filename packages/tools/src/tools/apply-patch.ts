@@ -1,5 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises"
-import { stat } from "node:fs/promises"
+import { readFile, stat, writeFile } from "node:fs/promises"
 import { isAbsolute, resolve } from "node:path"
 import type { Tool, ToolContext, ToolResult } from "../types"
 import { isPathInWorkspace } from "../types"

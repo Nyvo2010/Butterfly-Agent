@@ -22,7 +22,8 @@
       "@butterfly/context": ["./packages/context/src/index.ts"],
       "@butterfly/llm": ["./packages/llm/src/index.ts"],
       "@butterfly/tools": ["./packages/tools/src/index.ts"],
-      "@butterfly/agent": ["./packages/agent/src/index.ts"]
+      "@butterfly/agent": ["./packages/agent/src/index.ts"],
+      "@butterfly/server": ["./packages/server/src/index.ts"]
     },
     "baseUrl": "."
   }

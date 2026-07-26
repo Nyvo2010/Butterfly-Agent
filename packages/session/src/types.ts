@@ -53,6 +53,25 @@ export interface ToolCallRecord {
   finishedAt?: string
 }
 
+/**
+ * Accumulated token/cost usage for a session.
+ * Summed across all LLM calls. Mirrors OpenCode's per-session cost tracking so
+ * the client can render session lists with token/cost summaries without loading
+ * full message history.
+ */
+export interface SessionUsage {
+  /** Total prompt tokens across all LLM calls. */
+  promptTokens: number
+  /** Total completion tokens across all LLM calls. */
+  completionTokens: number
+  /** Total tokens (prompt + completion). */
+  totalTokens: number
+  /** Whether any provider-reported usage has been recorded. */
+  usageAvailable: boolean
+  /** Number of LLM calls made. */
+  callCount: number
+}
+
 export interface FileChange {
   path: string
   kind: "write" | "patch" | "delete"
@@ -74,6 +93,41 @@ export interface SessionState {
   snapshots?: Record<number, string>
   startedAt: string
   updatedAt: string
+  /** Human-readable title. Auto-derived from the first user message when not set. */
+  title?: string
+  /** Short summary of the session, generated on demand. */
+  summary?: string
+  /** Accumulated token usage across all LLM calls. */
+  usage?: SessionUsage
+  /** Parent session id if this session was forked from another. */
+  parentSessionId?: string
+  /** Whether the session is archived (hidden from default lists). */
+  archived?: boolean
+  /**
+   * Selected model for this session. When "auto" (default), the tiered model
+   * mapping from butterfly config is used. When set to a specific model
+   * (e.g., "anthropic/claude-sonnet-4-5"), that model is used for ALL tiers
+   * (no escalation to different models). Users can always choose a model
+   * from the available provider catalog. Mirrors OpenCode's per-session
+   * model selection.
+   */
+  selectedModel?: string
+  /**
+   * Active todo list for the session. Persisted alongside the session so
+   * todos survive restarts. Updated by the todowrite tool.
+   */
+  todos?: import("./todo").TodoItem[]
+}
+
+/** Default (zeroed) session usage. */
+export function zeroUsage(): SessionUsage {
+  return {
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    usageAvailable: false,
+    callCount: 0,
+  }
 }
 
 export function createSession(id: string, mode: Mode, tier: Tier = "standard"): SessionState {
@@ -88,5 +142,7 @@ export function createSession(id: string, mode: Mode, tier: Tier = "standard"): 
     readFiles: [],
     startedAt: now,
     updatedAt: now,
+    usage: zeroUsage(),
+    selectedModel: "auto",
   }
 }

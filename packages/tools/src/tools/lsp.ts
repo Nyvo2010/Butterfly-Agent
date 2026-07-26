@@ -99,10 +99,7 @@ export function createLspTool(lspClient: LSPClientLike): Tool {
             const symbols = await lspClient.getDocumentSymbols(filePath)
             return {
               kind: "ok",
-              output:
-                symbols.length === 0
-                  ? "No symbols found."
-                  : JSON.stringify(symbols, null, 2),
+              output: symbols.length === 0 ? "No symbols found." : JSON.stringify(symbols, null, 2),
             }
           }
           case "workspaceSymbol": {
@@ -157,19 +154,66 @@ export interface LSPClientLike {
   goToDefinition(
     file: string,
     position: { line: number; character: number },
-  ): Promise<Array<{ uri: string; range: { start: { line: number; character: number }; end: { line: number; character: number } } }>>
+  ): Promise<
+    Array<{
+      uri: string
+      range: {
+        start: { line: number; character: number }
+        end: { line: number; character: number }
+      }
+    }>
+  >
   findReferences(
     file: string,
     position: { line: number; character: number },
-  ): Promise<Array<{ uri: string; range: { start: { line: number; character: number }; end: { line: number; character: number } } }>>
+  ): Promise<
+    Array<{
+      uri: string
+      range: {
+        start: { line: number; character: number }
+        end: { line: number; character: number }
+      }
+    }>
+  >
   hover(file: string, position: { line: number; character: number }): Promise<string | null>
-  getDocumentSymbols(
-    file: string,
-  ): Promise<Array<{ name: string; kind: number; location: { uri: string; range: { start: { line: number; character: number }; end: { line: number; character: number } } }; containerName?: string }>>
-  getWorkspaceSymbols?(
-    query: string,
-  ): Promise<Array<{ name: string; kind: number; location: { uri: string; range: { start: { line: number; character: number }; end: { line: number; character: number } } }; containerName?: string }>>
-  getDiagnostics(
-    file?: string,
-  ): Promise<Array<{ uri: string; range: { start: { line: number; character: number }; end: { line: number; character: number } }; severity: string; message: string; source?: string }>>
+  getDocumentSymbols(file: string): Promise<
+    Array<{
+      name: string
+      kind: number
+      location: {
+        uri: string
+        range: {
+          start: { line: number; character: number }
+          end: { line: number; character: number }
+        }
+      }
+      containerName?: string
+    }>
+  >
+  getWorkspaceSymbols?(query: string): Promise<
+    Array<{
+      name: string
+      kind: number
+      location: {
+        uri: string
+        range: {
+          start: { line: number; character: number }
+          end: { line: number; character: number }
+        }
+      }
+      containerName?: string
+    }>
+  >
+  getDiagnostics(file?: string): Promise<
+    Array<{
+      uri: string
+      range: {
+        start: { line: number; character: number }
+        end: { line: number; character: number }
+      }
+      severity: string
+      message: string
+      source?: string
+    }>
+  >
 }

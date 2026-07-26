@@ -1,9 +1,5 @@
+import { discoverSkills, getAllSkills, getSkill } from "../skills"
 import type { Tool, ToolContext, ToolResult } from "../types"
-import {
-  getAllSkills,
-  getSkill,
-  discoverSkills,
-} from "../skills"
 
 /**
  * Skill tool — loads a skill's instructions into context.
@@ -31,10 +27,7 @@ export function createSkillTool(cwd: string): Tool {
       },
       required: ["name"],
     },
-    async execute(
-      input: Record<string, unknown>,
-      _ctx: ToolContext,
-    ): Promise<ToolResult> {
+    async execute(input: Record<string, unknown>, _ctx: ToolContext): Promise<ToolResult> {
       const name = String(input.name ?? "")
       if (!name) return { kind: "err", message: "Skill name is required" }
 

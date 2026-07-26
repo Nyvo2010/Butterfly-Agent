@@ -93,8 +93,7 @@ export function createTodowriteTool(deps: TodowriteToolDeps): Tool {
       const completed = todos.filter((t) => t.status === "completed").length
       return {
         kind: "ok",
-        output:
-          `Todo list updated (${todos.length} items, ${completed} completed):\n${summary}`,
+        output: `Todo list updated (${todos.length} items, ${completed} completed):\n${summary}`,
       }
     },
   }

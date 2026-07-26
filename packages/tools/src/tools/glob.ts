@@ -1,8 +1,8 @@
 import { isAbsolute, relative, resolve, sep } from "node:path"
+import { SKIP_DIRS, walk } from "@butterfly/core"
 import picomatch from "picomatch"
 import type { Tool } from "../types"
 import { isPathInWorkspace } from "../types"
-import { DEFAULT_SKIP_DIRS, walk } from "./walk"
 
 export const globTool: Tool<{ files: string[] }> = {
   name: "glob",
@@ -31,7 +31,7 @@ export const globTool: Tool<{ files: string[] }> = {
     }
     const matcher = picomatch(pattern, { dot: true })
     const files: string[] = []
-    const skipDirs = new Set([...DEFAULT_SKIP_DIRS, ...(ctx.skipDirs ?? [])])
+    const skipDirs = new Set([...SKIP_DIRS, ...(ctx.skipDirs ?? [])])
     const all = await walk(base, skipDirs)
     for (const file of all) {
       const rel = relative(base, file).split(sep).join("/")

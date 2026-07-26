@@ -93,10 +93,7 @@ async function tavilySearch(
     }
 
     const formatted = results
-      .map(
-        (r, i) =>
-          `${i + 1}. **${r.title}**\n   URL: ${r.url}\n   ${r.content.slice(0, 300)}`,
-      )
+      .map((r, i) => `${i + 1}. **${r.title}**\n   URL: ${r.url}\n   ${r.content.slice(0, 300)}`)
       .join("\n\n")
 
     return { kind: "ok", output: formatted }

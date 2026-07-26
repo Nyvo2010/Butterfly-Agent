@@ -2,6 +2,8 @@ export { FileSystemSessionStore } from "./fs-store"
 export { SQLiteSessionStore } from "./sqlite-store"
 export type { SessionStore } from "./store"
 export { InMemorySessionStore } from "./store"
+export type { TodoItem } from "./todo"
+export { clearSessionTodos, setSessionTodos } from "./todo"
 export type {
   FileChange,
   MessagePart,
@@ -9,9 +11,8 @@ export type {
   Role,
   SessionMessage,
   SessionState,
+  SessionUsage,
   Tier,
   ToolCallRecord,
 } from "./types"
-export { createSession } from "./types"
-export type { TodoItem } from "./todo"
-export { clearTodos, getTodos, updateTodos } from "./todo"
+export { createSession, zeroUsage } from "./types"

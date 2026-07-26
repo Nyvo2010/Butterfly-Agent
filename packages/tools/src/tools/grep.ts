@@ -1,8 +1,8 @@
 import { readFile, stat } from "node:fs/promises"
 import { isAbsolute, relative, resolve, sep } from "node:path"
+import { SKIP_DIRS, walk } from "@butterfly/core"
 import type { Tool } from "../types"
 import { isPathInWorkspace } from "../types"
-import { DEFAULT_SKIP_DIRS, walk } from "./walk"
 
 const MAX_GREP_FILE_BYTES = 1024 * 1024
 
@@ -47,7 +47,7 @@ export const grepTool: Tool<{ matches: Array<{ file: string; line: number; conte
       return { kind: "err", message: "regex pattern too complex; simplify or narrow the search" }
     }
     const matches: Array<{ file: string; line: number; content: string }> = []
-    const skipDirs = new Set([...DEFAULT_SKIP_DIRS, ...(ctx.skipDirs ?? [])])
+    const skipDirs = new Set([...SKIP_DIRS, ...(ctx.skipDirs ?? [])])
     const files = await walk(base, skipDirs)
     for (const file of files) {
       if (matches.length >= maxResults) break

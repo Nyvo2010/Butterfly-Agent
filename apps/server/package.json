@@ -1,7 +1,7 @@
 {
-  "name": "@butterfly/server",
+  "name": "@butterfly/server-app",
   "version": "0.1.0",
-  "description": "Butterfly Agent — Hono HTTP server with REST API + SSE streaming",
+  "description": "Butterfly Agent — HTTP server executable (thin entry point over @butterfly/server)",
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
@@ -11,13 +11,7 @@
     "build": "tsc"
   },
   "dependencies": {
-    "@butterfly/agent": "workspace:*",
-    "@butterfly/context": "workspace:*",
-    "@butterfly/core": "workspace:*",
-    "@butterfly/llm": "workspace:*",
-    "@butterfly/session": "workspace:*",
-    "@butterfly/tools": "workspace:*",
-    "hono": "^4"
+    "@butterfly/server": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22",

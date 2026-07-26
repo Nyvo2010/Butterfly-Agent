@@ -1,5 +1,5 @@
-// Structured logging placeholder.
-// Event-based tracing, not ad-hoc console.log.
+// Structured logging — emits JSON-formatted log events to stdout/stderr.
+// All subsystems should use `log()` instead of ad-hoc console.log.
 
 export type LogLevel = "debug" | "info" | "warn" | "error"
 

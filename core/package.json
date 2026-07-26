@@ -9,6 +9,6 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run core"
+    "test": "echo 'Use pnpm test from project root to run all tests'"
   }
 }

@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run packages/llm"
+    "test": "echo 'Use pnpm test from project root to run all tests'"
   },
   "dependencies": {
     "@ai-sdk/openai": "^1.3.0",

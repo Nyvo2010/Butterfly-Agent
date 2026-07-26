@@ -9,6 +9,7 @@
     { "path": "../../packages/agent" },
     { "path": "../../packages/context" },
     { "path": "../../packages/llm" },
+    { "path": "../../packages/server" },
     { "path": "../../packages/session" },
     { "path": "../../packages/tools" },
     { "path": "../../core" }

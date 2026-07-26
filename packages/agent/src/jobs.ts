@@ -34,8 +34,7 @@ const DEFAULT_STALE_SESSION_AGE_MS = 24 * 60 * 60 * 1000
 const DEFAULT_INTERVAL_MS = 60_000
 
 export function startBackgroundJobs(opts: BackgroundJobsOptions): BackgroundJobsHandle {
-  const intervalMs =
-    opts.config.butterfly?.backgroundJobs?.intervalMs ?? DEFAULT_INTERVAL_MS
+  const intervalMs = opts.config.butterfly?.backgroundJobs?.intervalMs ?? DEFAULT_INTERVAL_MS
   const staleAgeMs =
     opts.config.butterfly?.backgroundJobs?.staleSessionAgeMs ?? DEFAULT_STALE_SESSION_AGE_MS
 
@@ -50,16 +49,14 @@ export function startBackgroundJobs(opts: BackgroundJobsOptions): BackgroundJobs
       const now = Date.now()
       const staleThreshold = now - staleAgeMs
 
-      const sessionIds = await opts.store.list?.()
-      if (sessionIds && sessionIds.length > 0) {
+      const sessionEntries = await opts.store.list()
+      if (sessionEntries && sessionEntries.length > 0) {
         let cleaned = 0
-        for (const sid of sessionIds) {
+        for (const entry of sessionEntries) {
           try {
-            const session = await opts.store.get(sid)
-            if (!session) continue
-            const updatedAt = new Date(session.updatedAt).getTime()
+            const updatedAt = new Date(entry.updatedAt).getTime()
             if (updatedAt < staleThreshold) {
-              await opts.store.delete?.(sid)
+              await opts.store.delete(entry.id)
               cleaned++
             }
           } catch {

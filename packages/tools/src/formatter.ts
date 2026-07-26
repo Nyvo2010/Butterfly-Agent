@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from "node:fs"
-import { join, dirname } from "node:path"
 import { execSync } from "node:child_process"
+import { existsSync, readFileSync } from "node:fs"
+import { dirname, join } from "node:path"
 
 /**
  * Formatter auto-detection system — mirrors OpenCode's formatter detection.
@@ -30,9 +30,21 @@ export const FORMATTERS: FormatterInfo[] = [
   {
     name: "prettier",
     extensions: [
-      ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
-      ".html", ".css", ".scss", ".json", ".jsonc",
-      ".yaml", ".yml", ".md", ".mdx",
+      ".js",
+      ".jsx",
+      ".ts",
+      ".tsx",
+      ".mjs",
+      ".cjs",
+      ".html",
+      ".css",
+      ".scss",
+      ".json",
+      ".jsonc",
+      ".yaml",
+      ".yml",
+      ".md",
+      ".mdx",
     ],
     enabled(cwd) {
       if (!hasPackageDepUp(cwd, "prettier")) return false

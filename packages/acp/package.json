@@ -8,13 +8,15 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "start": "tsx src/index.ts",
-    "build": "tsc"
+    "build": "tsc",
+    "test": "echo 'Use pnpm test from project root to run all tests'"
   },
   "dependencies": {
     "@butterfly/agent": "workspace:*",
     "@butterfly/context": "workspace:*",
     "@butterfly/core": "workspace:*",
     "@butterfly/llm": "workspace:*",
+    "@butterfly/server": "workspace:*",
     "@butterfly/session": "workspace:*",
     "@butterfly/tools": "workspace:*"
   },

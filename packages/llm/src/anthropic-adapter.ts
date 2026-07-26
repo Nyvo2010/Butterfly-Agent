@@ -35,7 +35,7 @@ export class AnthropicClient implements LLMClient {
     let systemPrompt = req.system || ""
     for (const sm of systemMessages) {
       const content = typeof sm.content === "string" ? sm.content : JSON.stringify(sm.content)
-      if (systemPrompt) systemPrompt += "\n\n" + content
+      if (systemPrompt) systemPrompt += `\n\n${content}`
       else systemPrompt = content
     }
 
@@ -134,7 +134,7 @@ export class AnthropicClient implements LLMClient {
     let systemPrompt = req.system || ""
     for (const sm of systemMessages) {
       const content = typeof sm.content === "string" ? sm.content : JSON.stringify(sm.content)
-      if (systemPrompt) systemPrompt += "\n\n" + content
+      if (systemPrompt) systemPrompt += `\n\n${content}`
       else systemPrompt = content
     }
 

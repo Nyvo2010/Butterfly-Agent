@@ -21,6 +21,20 @@ export interface ModelResolution {
   escalationDepth: number
 }
 
+/**
+ * Model Router — resolves which model to use for each agent step.
+ *
+ * Supports two modes:
+ *   1. **Auto mode** (default, selectedModel === "auto" or undefined):
+ *      Uses the tiered model mapping from butterfly config. Escalation moves
+ *      up the tier chain (trivial → standard → complex → escalate).
+ *   2. **Fixed mode** (selectedModel is a specific model string):
+ *      Always uses that model regardless of tier. Escalation is a no-op.
+ *      This is what the user gets when they pick a specific model from the UI.
+ *
+ * Mirrors OpenCode's model routing, where per-session model selection overrides
+ * the tiered defaults.
+ */
 export class ModelRouter {
   private readonly mapping: TierMapping
   private readonly escalationLimit: number
@@ -30,25 +44,39 @@ export class ModelRouter {
     this.escalationLimit = opts.escalationLimit ?? 3
   }
 
-  resolve(tier: Tier, depth: number): ModelResolution {
+  /**
+   * Resolve the model to use for the current step.
+   * When `selectedModel` is provided and not "auto", it is returned directly
+   * (ignoring tiers entirely). Otherwise, the tier mapping is used.
+   */
+  resolve(tier: Tier, depth: number, selectedModel?: string): ModelResolution {
+    if (selectedModel && selectedModel !== "auto") {
+      // Fixed model mode: always return the selected model, ignore tiers.
+      return { tier, model: selectedModel, escalationDepth: depth }
+    }
+    // Auto mode: use tiered model mapping.
     return { tier, model: this.mapping[tier], escalationDepth: depth }
   }
 
-  /**
-   * Returns the next tier if escalation is possible; same tier if already at top.
-   * MVP-SCOPE §7: escalation max depth = 2; we count the incoming depth
-   * and refuse further escalation past the limit.
-   */
   /**
    * Escalate to the next tier. Max depth = escalationLimit (default 3).
    * The depth parameter tracks ACTUAL escalation count (not derived from tier),
    * so that restored sessions don't immediately cap escalation.
    * escalationLimit=3 allows: standard→complex (depth 1), complex→escalate (depth 2), escalate+ (depth 3).
+   *
+   * When a fixed model is selected (selectedModel provided and not "auto"),
+   * escalation is a no-op — the model stays the same regardless of failures.
    */
   escalate(
     currentTier: Tier,
     currentDepth: number,
+    selectedModel?: string,
   ): { tier: Tier; depth: number; capped: boolean } {
+    // Fixed model mode: escalation is a no-op.
+    if (selectedModel && selectedModel !== "auto") {
+      return { tier: currentTier, depth: currentDepth, capped: true }
+    }
+
     if (currentDepth >= this.escalationLimit) {
       log("warn", "router.escalation_capped", {
         tier: currentTier,

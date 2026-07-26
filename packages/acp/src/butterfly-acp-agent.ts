@@ -16,12 +16,9 @@
 
 import type { Agent, AgentSideConnection } from "@agentclientprotocol/sdk"
 import type { AgentFactoryResult } from "@butterfly/agent"
-import { createAgent } from "@butterfly/agent"
-import { GPTTokenizer } from "@butterfly/context"
-import { loadButterflyConfig, loadConfig, log, setLogLevel } from "@butterfly/core"
-import { createClient } from "@butterfly/llm"
+import { log } from "@butterfly/core"
+import { ServerApp } from "@butterfly/server"
 import type { SessionState } from "@butterfly/session"
-import { createSession, FileSystemSessionStore } from "@butterfly/session"
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -69,29 +66,18 @@ export function createButterflyACP(
   options?: ButterflyACPOptions,
 ): Agent {
   const cwd = options?.cwd ?? process.cwd()
-  const cfg = loadConfig()
-  setLogLevel(cfg.agent.logLevel)
-  const bfConfig = loadButterflyConfig(cwd)
 
-  const tokenizer = new GPTTokenizer()
-  tokenizer.warmup()
-
-  const store = new FileSystemSessionStore()
-  const model = bfConfig.model ?? ""
-  const llm = createClient(model, cfg.llm, bfConfig.providers)
+  // Use the shared ServerApp core — eliminates bootstrap duplication with
+  // the HTTP server. Both transports now share config, tokenizer, store, llm,
+  // bus, session-manager, and run-state.
+  const app = new ServerApp({ cwd })
 
   // Lazy-init the agent factory on first use (createAgent is async).
   // Clear the promise on failure so subsequent calls can retry.
   let agentPromise: Promise<AgentFactoryResult> | null = null
   const getAgent = (): Promise<AgentFactoryResult> => {
     if (!agentPromise) {
-      agentPromise = createAgent({
-        cwd,
-        llm,
-        tokenizer,
-        store,
-        config: bfConfig,
-      }).catch((err) => {
+      agentPromise = app.createAgent().catch((err) => {
         agentPromise = null
         throw err
       })
@@ -115,16 +101,17 @@ export function createButterflyACP(
 
     // ── newSession ────────────────────────────────────────────────────
     async newSession(params) {
-      const sessionId = `acp-${Date.now()}`
-      const session = createSession(sessionId, "build")
-      sessions.set(sessionId, { session, cwd: params.cwd ?? cwd, mode: "build" })
-      log("info", "acp.new_session", { sessionId, cwd: params.cwd })
-      return { sessionId }
+      // Use the shared SessionManager so the session is persisted and a
+      // session.created event is emitted — consistent with the HTTP path.
+      const session = await app.sessionManager.create({ mode: "build" })
+      sessions.set(session.id, { session, cwd: params.cwd ?? cwd, mode: "build" })
+      log("info", "acp.new_session", { sessionId: session.id, cwd: params.cwd })
+      return { sessionId: session.id }
     },
 
     // ── loadSession (optional) ────────────────────────────────────────
     async loadSession(params) {
-      const existing = await store.load(params.sessionId)
+      const existing = await app.sessionManager.load(params.sessionId)
       if (!existing) {
         throw new Error(`Session not found: ${params.sessionId}`)
       }
@@ -153,10 +140,13 @@ export function createButterflyACP(
       let acpSession = sessions.get(sessionId)
 
       if (!acpSession) {
-        const sId = sessionId ?? `acp-${Date.now()}`
-        const session = createSession(sId, "build")
+        // Use the shared SessionManager for persistence + event emission.
+        const session = await app.sessionManager.create({
+          mode: "build",
+          id: sessionId ?? undefined,
+        })
         acpSession = { session, cwd, mode: "build" }
-        sessions.set(sId, acpSession)
+        sessions.set(session.id, acpSession)
       }
 
       // The ACP SDK's prompt params shape varies; use a narrow accessor type.
@@ -174,8 +164,8 @@ export function createButterflyACP(
       log("info", "acp.prompt", { sessionId: acpSession.session.id, query: query.slice(0, 200) })
 
       try {
-        const sceOpts = bfConfig.butterfly?.sce
-        const coeOpts = bfConfig.butterfly?.coe
+        const sceOpts = app.butterflyConfig.butterfly?.sce
+        const coeOpts = app.butterflyConfig.butterfly?.coe
 
         const agent = await getAgent()
 
@@ -186,7 +176,7 @@ export function createButterflyACP(
           session: acpSession.session,
           query,
           cwd: acpSession.cwd,
-          maxSteps: bfConfig.butterfly?.maxSteps ?? 20,
+          maxSteps: app.butterflyConfig.butterfly?.maxSteps ?? 20,
           maxContextTokens: coeOpts?.maxContextTokens ?? 8000,
           toolMessageMaxTokens: coeOpts?.toolMessageMaxTokens,
           sceOptions: sceOpts
@@ -200,7 +190,8 @@ export function createButterflyACP(
           bootstrapSummary: agent.bootstrapSummary || undefined,
         })
 
-        // Update stored session for multi-turn
+        // Update stored session for multi-turn (via the shared session manager)
+        await app.sessionManager.save(result.session)
         acpSession.session = result.session
         sessions.set(result.session.id, acpSession)
 

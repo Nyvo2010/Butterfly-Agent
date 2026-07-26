@@ -1,9 +1,14 @@
 /**
- * Session Todo management — persistent todo list per session.
- * Mirrors OpenCode's SessionTodo service.
+ * Session Todo management — persisted as part of SessionState.todos.
+ *
+ * Todos live on the SessionState and are saved/loaded with the session
+ * by the SessionStore. This eliminates data loss on restart and ensures
+ * todos are shared across server instances when using SQLite storage.
+ *
+ * The factory (packages/agent/src/factory.ts) creates a mutable ref
+ * that the todowrite tool reads/writes; the agent loop syncs the ref
+ * into the session before each save so todos are persisted.
  */
-
-import type { SessionStore } from "./store"
 
 export interface TodoItem {
   content: string
@@ -12,26 +17,19 @@ export interface TodoItem {
 }
 
 /**
- * In-memory todo store. For production, this should be persisted alongside
- * the session in the SQLite/Filesystem stores.
+ * Persist todos into a session state. Pure function — returns a new state.
  */
-const todoStore = new Map<string, TodoItem[]>()
-
-export function getTodos(sessionId: string): TodoItem[] {
-  return todoStore.get(sessionId) ?? []
-}
-
-export function updateTodos(
-  sessionId: string,
+export function setSessionTodos(
+  session: { todos?: TodoItem[] },
   todos: TodoItem[],
-  store?: SessionStore,
-): void {
-  todoStore.set(sessionId, todos)
-  // Persist alongside session if store supports it.
-  // For now, todos live in memory only and are lost on restart.
-  void store
+): { todos: TodoItem[] } {
+  return { ...session, todos }
 }
 
-export function clearTodos(sessionId: string): void {
-  todoStore.delete(sessionId)
+/**
+ * Clear todos from a session state. Pure function.
+ */
+export function clearSessionTodos(session: { todos?: TodoItem[] }): { todos?: TodoItem[] } {
+  const { todos: _, ...rest } = session as { todos?: TodoItem[]; [key: string]: unknown }
+  return rest
 }

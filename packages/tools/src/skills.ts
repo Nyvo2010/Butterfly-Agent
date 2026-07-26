@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
-import { join } from "node:path"
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import { homedir } from "node:os"
+import { join } from "node:path"
 
 /**
  * Butterfly Skill System.
@@ -66,11 +66,7 @@ function scanDirectory(dir: string, skState: SkillState): void {
   }
 }
 
-function walkSkillDir(
-  skState: SkillState,
-  currentDir: string,
-  depth = 0,
-): void {
+function walkSkillDir(skState: SkillState, currentDir: string, depth = 0): void {
   if (depth > 3) return // Guard against deep recursion
 
   let entries: string[]
@@ -82,7 +78,8 @@ function walkSkillDir(
 
   for (const entry of entries) {
     const fullPath = join(currentDir, entry)
-    let st
+    // biome-ignore lint/suspicious/noExplicitAny: statSync return type
+    let st: any
     try {
       st = statSync(fullPath)
     } catch {
@@ -97,10 +94,7 @@ function walkSkillDir(
   }
 }
 
-function loadSkillFile(
-  filePath: string,
-  skState: SkillState,
-): void {
+function loadSkillFile(filePath: string, skState: SkillState): void {
   try {
     const raw = readFileSync(filePath, "utf8")
     const parsed = parseSkillMarkdown(raw, filePath)
@@ -113,10 +107,7 @@ function loadSkillFile(
   }
 }
 
-function parseSkillMarkdown(
-  raw: string,
-  location: string,
-): SkillInfo | null {
+function parseSkillMarkdown(raw: string, location: string): SkillInfo | null {
   const frontmatterMatch = raw.match(/^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/)
   if (!frontmatterMatch) return null
 

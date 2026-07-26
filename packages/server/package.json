@@ -1,0 +1,23 @@
+{
+  "name": "@butterfly/server",
+  "version": "0.1.0",
+  "description": "Butterfly Agent — server core: app lifecycle, event bus, session manager, run-state, and modular HTTP API",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "test": "echo 'Use pnpm test from project root to run all tests'"
+  },
+  "files": ["dist"],
+  "dependencies": {
+    "@butterfly/agent": "workspace:*",
+    "@butterfly/context": "workspace:*",
+    "@butterfly/core": "workspace:*",
+    "@butterfly/llm": "workspace:*",
+    "@butterfly/session": "workspace:*",
+    "@butterfly/tools": "workspace:*"
+  }
+}

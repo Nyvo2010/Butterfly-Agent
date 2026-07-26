@@ -56,13 +56,13 @@ function createSnapshotService(): SnapshotService {
     return join(homedir(), ".butterfly", "snapshots", hash)
   }
 
-  async function git(worktree: string, args: string[], opts?: { stdin?: string; cwd?: string }): Promise<{ code: number; stdout: string; stderr: string }> {
+  async function git(
+    worktree: string,
+    args: string[],
+    opts?: { stdin?: string; cwd?: string },
+  ): Promise<{ code: number; stdout: string; stderr: string }> {
     const gitDir = getGitDir(worktree)
-    const fullArgs = [
-      "--git-dir", gitDir,
-      "--work-tree", worktree,
-      ...args,
-    ]
+    const fullArgs = ["--git-dir", gitDir, "--work-tree", worktree, ...args]
     try {
       const { stdout, stderr } = await execFileAsync("git", fullArgs, {
         cwd: opts?.cwd ?? worktree,
@@ -114,9 +114,7 @@ function createSnapshotService(): SnapshotService {
       await git(worktree, ["add", "--all", "--", "."])
 
       // Diff from snapshot to current.
-      const diff = await git(worktree, [
-        "diff", "--cached", "--name-only", hash, "--", ".",
-      ])
+      const diff = await git(worktree, ["diff", "--cached", "--name-only", hash, "--", "."])
 
       const files = diff.stdout.trim().split("\n").filter(Boolean)
       return { hash, files }
@@ -147,9 +145,7 @@ function createSnapshotService(): SnapshotService {
       // Stage current state.
       await git(worktree, ["add", "--all", "--", "."])
 
-      const diff = await git(worktree, [
-        "diff", "--cached", "--no-ext-diff", hash, "--", ".",
-      ])
+      const diff = await git(worktree, ["diff", "--cached", "--no-ext-diff", hash, "--", "."])
 
       return diff.stdout.trim()
     },

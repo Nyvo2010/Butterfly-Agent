@@ -7,7 +7,7 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run packages/agent",
+    "test": "echo 'Use pnpm test from project root to run all tests'",
     "build": "tsc"
   },
   "files": ["dist"],

@@ -12,9 +12,13 @@
 
 import { COE, type GPTTokenizer, SCE } from "@butterfly/context"
 import { type ButterflyConfig, DEFAULT_CONFIG, detectProject, log } from "@butterfly/core"
-import { ForgivingToolCallParser, type LLMClient, type LLMStreamEvent } from "@butterfly/llm"
+import {
+  ForgivingToolCallParser,
+  type LLMClient,
+  type LLMStreamEvent,
+  type ProviderService,
+} from "@butterfly/llm"
 import type { FileChange, SessionState, SessionStore, TodoItem } from "@butterfly/session"
-import { clearTodos, getTodos, updateTodos } from "@butterfly/session"
 import type { LSPClientLike } from "@butterfly/tools"
 import {
   activateAllPlugins,
@@ -45,7 +49,7 @@ import {
   writeTool,
 } from "@butterfly/tools"
 import { startBackgroundJobs } from "./jobs"
-import { AgentLoop } from "./loop"
+import { type AgentEventSink, AgentLoop } from "./loop"
 import { buildPermissionHook } from "./permission"
 import { QualityMonitor } from "./quality-monitor"
 import { ModelRouter } from "./router"
@@ -57,11 +61,21 @@ import { Subagent } from "./subagent"
  * Used as default until a real LSP client is wired by the CLI/server.
  */
 class NoOpLSPClient implements LSPClientLike {
-  async goToDefinition(): Promise<Array<{ uri: string; range: unknown }>> { return [] }
-  async findReferences(): Promise<Array<{ uri: string; range: unknown }>> { return [] }
-  async hover(): Promise<string | null> { return null }
-  async getDocumentSymbols(): Promise<Array<{ name: string; kind: number }>> { return [] }
-  async getDiagnostics(): Promise<Array<{ uri: string; range: unknown; severity: string; message: string }>> { return [] }
+  async goToDefinition() {
+    return []
+  }
+  async findReferences() {
+    return []
+  }
+  async hover() {
+    return null
+  }
+  async getDocumentSymbols() {
+    return []
+  }
+  async getDiagnostics() {
+    return []
+  }
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -69,8 +83,18 @@ class NoOpLSPClient implements LSPClientLike {
 export interface AgentFactoryOptions {
   /** Working directory for the agent. */
   cwd: string
-  /** LLM client instance (already created by the caller based on provider preferences). */
-  llm: LLMClient
+  /**
+   * LLM client instance (backward compat). When not set, providerService
+   * is used for dynamic model selection. At least one of llm or
+   * providerService must be provided.
+   */
+  llm?: LLMClient
+  /**
+   * Provider service for dynamic model selection (OpenCode-compatible).
+   * When set, the loop creates LLM clients on demand based on the
+   * session's selectedModel. Takes precedence over `llm` when both are set.
+   */
+  providerService?: ProviderService
   /** Tokenizer instance shared across SCE/COE. */
   tokenizer: GPTTokenizer
   /** Session store for persistence. */
@@ -88,6 +112,12 @@ export interface AgentFactoryOptions {
   onIteration?: (session: SessionState, iteration: number) => void
   /** Human-in-the-loop callback for ask_user tool. */
   onAskUser?: (question: string, options?: string[]) => Promise<string | null>
+  /**
+   * Optional event sink for decoupled event publishing (server event bus).
+   * When set, the loop emits tool/file/stream events through it so external
+   * subscribers (HTTP /event SSE clients, etc.) can observe without coupling.
+   */
+  bus?: AgentEventSink
 
   /**
    * Optional LSP client for code intelligence (go-to-definition, find-references, etc.).
@@ -131,6 +161,11 @@ export async function createAgent(opts: AgentFactoryOptions): Promise<AgentFacto
   // the active session without the ToolContext carrying sessionId.
   const sessionRef = { current: "" }
 
+  // Mutable todo list ref — the todowrite tool reads/writes this ref;
+  // the loop syncs it into session.todos before each save so todos are
+  // persisted alongside the session (survives restarts).
+  const todosRef: { current: TodoItem[] } = { current: [] }
+
   // Register essential base tools (minimal set, OpenCode-inspired)
   registry.register(readTool)
   registry.register(writeTool)
@@ -145,13 +180,17 @@ export async function createAgent(opts: AgentFactoryOptions): Promise<AgentFacto
   registry.register(questionTool)
   registry.register(webFetchTool)
   registry.register(webSearchTool)
-  registry.register(createLspTool(opts.lspClient ?? new NoOpLSPClient()))
+  registry.register(createLspTool((opts.lspClient ?? new NoOpLSPClient()) as LSPClientLike))
 
-  // Session-scoped todowrite tool — persists todos per session.
+  // Session-scoped todowrite tool — persists todos per session via the mutable ref.
+  // The loop syncs todosRef.current → session.todos before each save so todos
+  // survive restarts and are shared across server instances.
   registry.register(
     createTodowriteTool({
-      getTodos: () => getTodos(sessionRef.current),
-      updateTodos: (todos: TodoItem[]) => updateTodos(sessionRef.current, todos),
+      getTodos: () => todosRef.current,
+      updateTodos: (todos: TodoItem[]) => {
+        todosRef.current = todos
+      },
     }),
   )
 
@@ -206,6 +245,7 @@ export async function createAgent(opts: AgentFactoryOptions): Promise<AgentFacto
   const sce = new SCE(opts.tokenizer)
   const loop = new AgentLoop({
     llm: opts.llm,
+    providerService: opts.providerService,
     sce,
     coe: new COE(opts.tokenizer),
     router,
@@ -215,22 +255,33 @@ export async function createAgent(opts: AgentFactoryOptions): Promise<AgentFacto
     permissionHook,
     qualityMonitor,
     onStreamEvent: opts.onStreamEvent,
+    bus: opts.bus,
+    todosRef,
     onIteration: (session, iteration) => {
       // Keep session ref current for session-scoped tools (todowrite).
       sessionRef.current = session.id
       fileChangesRef.changes = session.fileChanges
 
+      // Restore persisted todos from session into the mutable ref.
+      // On the first iteration, session.todos carries the persisted state.
+      if (session.todos && todosRef.current.length === 0) {
+        todosRef.current = session.todos
+      }
+
       // Git snapshot tracking (fire-and-forget, matches OpenCode's async snapshot pattern).
       // Snapshot after each iteration so the session has a revert point for every step.
       const snapshotService = getSnapshotService()
-      snapshotService.track(opts.cwd).then((hash) => {
-        if (hash) {
-          if (!session.snapshots) session.snapshots = {}
-          session.snapshots[iteration] = hash
-        }
-      }).catch(() => {
-        // Snapshot failure is non-fatal — the loop continues without a revert point.
-      })
+      snapshotService
+        .track(opts.cwd)
+        .then((hash) => {
+          if (hash) {
+            if (!session.snapshots) session.snapshots = {}
+            session.snapshots[iteration] = hash
+          }
+        })
+        .catch(() => {
+          // Snapshot failure is non-fatal — the loop continues without a revert point.
+        })
 
       opts.onIteration?.(session, iteration)
     },
@@ -266,10 +317,7 @@ export async function createAgent(opts: AgentFactoryOptions): Promise<AgentFacto
   // Skill list is also appended to the bootstrap summary so the model
   // knows which skills are available before making tool calls.
   const skillsPromptBlock = formatSkillsForPrompt(discoverSkills(opts.cwd))
-  const bootstrapSummary = [
-    bootstrap.summary,
-    skillsPromptBlock,
-  ].filter(Boolean).join("\n\n")
+  const bootstrapSummary = [bootstrap.summary, skillsPromptBlock].filter(Boolean).join("\n\n")
 
   // Activate plugins from config (post-registry setup, so plugins can use all tools).
   // Await activation so plugins are guaranteed loaded before the agent runs.
@@ -286,7 +334,9 @@ export async function createAgent(opts: AgentFactoryOptions): Promise<AgentFacto
   const backgroundJobs = startBackgroundJobs({
     cwd: opts.cwd,
     store: opts.store,
-    config: opts.config,
+    config: opts.config as {
+      butterfly?: { backgroundJobs?: { intervalMs?: number; staleSessionAgeMs?: number } }
+    },
   })
 
   return {
@@ -310,7 +360,9 @@ export async function createAgent(opts: AgentFactoryOptions): Promise<AgentFacto
         }
       }
       // Clean up session todo state if a session ran.
-      if (sessionRef.current) clearTodos(sessionRef.current)
+      if (sessionRef.current) {
+        todosRef.current = []
+      }
     },
     fileChangesRef,
     bootstrapSummary,

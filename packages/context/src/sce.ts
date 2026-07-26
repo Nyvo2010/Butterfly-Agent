@@ -366,11 +366,7 @@ export class SCE {
    * Fallback: walk filesystem tree and grep each file with Node.js regex.
    * Slower than ripgrep but works without external dependencies.
    */
-  private async nodeGrep(
-    re: RegExp,
-    cwd: string,
-    maxResults: number,
-  ): Promise<GrepMatch[]> {
+  private async nodeGrep(re: RegExp, cwd: string, maxResults: number): Promise<GrepMatch[]> {
     const matches: GrepMatch[] = []
     const files = await walkWithDefaults(cwd)
     for (const file of files) {

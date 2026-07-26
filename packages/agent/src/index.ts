@@ -1,6 +1,14 @@
+export type { ProviderService } from "@butterfly/llm"
 export type { AgentFactoryOptions, AgentFactoryResult } from "./factory"
 export { createAgent } from "./factory"
-export type { AgentLoopDeps, PermissionHook, RunRequest, RunResult, StopReason } from "./loop"
+export type {
+  AgentEventSink,
+  AgentLoopDeps,
+  PermissionHook,
+  RunRequest,
+  RunResult,
+  StopReason,
+} from "./loop"
 export { AgentLoop, isIntermediateAssistantMessage } from "./loop"
 export { kindsForMode, modePolicyText } from "./modes"
 export { buildPermissionHook } from "./permission"

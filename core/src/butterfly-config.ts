@@ -56,16 +56,83 @@ export interface ButterflyAgentConfig {
   description?: string
 }
 
-/** OpenCode-compatible provider configuration. */
+/**
+ * OpenCode-compatible provider configuration.
+ * Supports all major LLM providers, matching OpenCode's provider type list.
+ *
+ * Extends OpenCode's ConfigProvider.Info with the same fields:
+ *   - name: human-readable name (optional)
+ *   - env: required environment variables for auth
+ *   - api: provider API type (aisdk or native)
+ *   - models: per-model overrides (cost, limit, capabilities, request)
+ *   - options: provider options forwarded to the adapter
+ */
 export interface ButterflyProviderConfig {
-  /** Provider type: "openai", "anthropic", or "gemini". */
-  provider: "openai" | "anthropic" | "gemini"
+  /**
+   * Provider type: openai, anthropic, google, openai-compatible, deepseek,
+   * groq, togetherai, fireworks, cerebras, xai, openrouter, mistral, cohere,
+   * perplexity, azure, amazon-bedrock, github-copilot, cloudflare.
+   */
+  provider:
+    | "openai"
+    | "anthropic"
+    | "gemini"
+    | "google"
+    | "openai-compatible"
+    | "deepseek"
+    | "groq"
+    | "togetherai"
+    | "fireworks"
+    | "cerebras"
+    | "xai"
+    | "openrouter"
+    | "mistral"
+    | "cohere"
+    | "perplexity"
+    | "azure"
+    | "amazon-bedrock"
+    | "github-copilot"
+    | "cloudflare"
+    | "baseten"
+    | "deepinfra"
+    | "vercel"
   /** API key for this provider. */
   apiKey: string
   /** Optional base URL override (for proxies, self-hosted, etc.). */
   baseURL?: string
   /** Disable this provider without removing it from config. */
   disabled?: boolean
+  /**
+   * Required environment variable names for auth.
+   * Mirrors OpenCode's provider `env` field. The UI uses this to show
+   * which env vars need to be set before a provider is usable.
+   */
+  env?: string[]
+  /**
+   * Custom model overrides — map model id to per-model config.
+   * Mirrors OpenCode's `ConfigProvider.Info.models`.
+   */
+  models?: Record<
+    string,
+    {
+      /** Human-readable display name. */
+      name?: string
+      /** Model family (e.g., "claude", "gpt"). */
+      family?: string
+      /** Disable this specific model. */
+      disabled?: boolean
+      /** Per-request provider options (headers + body). */
+      request?: {
+        headers?: Record<string, string>
+        body?: Record<string, unknown>
+      }
+    }
+  >
+  /**
+   * Provider options forwarded to the LLM adapter.
+   * For OpenAI: reasoning_effort, text_verbosity, etc.
+   */
+  options?: Record<string, unknown>
 }
 
 export interface ButterflyPermissionConfig {
@@ -158,10 +225,9 @@ deepFreeze(DEFAULT_CONFIG)
 // ─── Loading ───────────────────────────────────────────────────────────────────
 
 /**
- * Strip JSON comments (// and /*) for JSONC support.
- * Note: this is a best-effort heuristic. It may incorrectly strip `//` inside
- * string values (e.g., URLs like "https://"). For correct JSONC parsing,
- * a proper parser (e.g., jsonc-parser) should be used.
+ * Strip JSON comments (single-line // and multi-line) for JSONC support.
+ * Uses a state machine that tracks string literals to avoid stripping `//`
+ * that appears inside string values (e.g., URLs like "https://").
  */
 function stripJsonComments(raw: string): string {
   // Use a state machine: track whether we're inside a string to avoid
@@ -371,16 +437,78 @@ function validateButterflyConfig(raw: Record<string, unknown>): ButterflyConfig 
         const v = val as Record<string, unknown>
         const provider = v.provider as string | undefined
         const apiKey = v.apiKey as string | undefined
-        if (
-          provider &&
-          (provider === "openai" || provider === "anthropic" || provider === "gemini") &&
-          typeof apiKey === "string"
-        ) {
+        const VALID_PROVIDERS = [
+          "openai",
+          "anthropic",
+          "gemini",
+          "google",
+          "openai-compatible",
+          "deepseek",
+          "groq",
+          "togetherai",
+          "fireworks",
+          "cerebras",
+          "xai",
+          "openrouter",
+          "mistral",
+          "cohere",
+          "perplexity",
+          "azure",
+          "amazon-bedrock",
+          "github-copilot",
+          "cloudflare",
+          "baseten",
+          "deepinfra",
+          "vercel",
+        ]
+        if (provider && VALID_PROVIDERS.includes(provider) && typeof apiKey === "string") {
+          const models = v.models as Record<string, Record<string, unknown>> | undefined
+          const parsedModels: ButterflyProviderConfig["models"] = models
+            ? Object.fromEntries(
+                Object.entries(models)
+                  .filter(([, m]) => typeof m === "object" && m !== null)
+                  .map(([mid, m]) => [
+                    mid,
+                    {
+                      name: typeof m.name === "string" ? m.name : undefined,
+                      family: typeof m.family === "string" ? m.family : undefined,
+                      disabled: m.disabled === true ? true : undefined,
+                      request:
+                        typeof m.request === "object" && m.request !== null
+                          ? {
+                              headers:
+                                typeof (m.request as Record<string, unknown>).headers === "object"
+                                  ? ((m.request as Record<string, unknown>).headers as Record<
+                                      string,
+                                      string
+                                    >)
+                                  : undefined,
+                              body:
+                                typeof (m.request as Record<string, unknown>).body === "object"
+                                  ? ((m.request as Record<string, unknown>).body as Record<
+                                      string,
+                                      unknown
+                                    >)
+                                  : undefined,
+                            }
+                          : undefined,
+                    },
+                  ]),
+              )
+            : undefined
           providers[key] = {
-            provider: provider as "openai" | "anthropic" | "gemini",
+            provider: provider as ButterflyProviderConfig["provider"],
             apiKey,
             baseURL: typeof v.baseURL === "string" ? v.baseURL : undefined,
             disabled: v.disabled === true ? true : undefined,
+            env: Array.isArray(v.env)
+              ? v.env.filter((e): e is string => typeof e === "string")
+              : undefined,
+            models: parsedModels,
+            options:
+              typeof v.options === "object" && v.options !== null && !Array.isArray(v.options)
+                ? (v.options as Record<string, unknown>)
+                : undefined,
           }
         }
       }

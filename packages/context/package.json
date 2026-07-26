@@ -8,7 +8,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run packages/context"
+    "test": "echo 'Use pnpm test from project root to run all tests'"
   },
   "files": ["dist"],
   "dependencies": {
