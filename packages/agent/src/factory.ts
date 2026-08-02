@@ -145,6 +145,8 @@ export async function createAgent(opts: AgentFactoryOptions): Promise<AgentFacto
   // the loop syncs it into session.todos before each save so todos are
   // persisted alongside the session (survives restarts).
   const todosRef: { current: TodoItem[] } = { current: [] }
+  // Last emitted todo signature — change-detection guard for todo.updated.
+  let lastTodoSignature = ""
 
   // Register essential base tools (minimal set, OpenCode-inspired)
   registry.register(readTool)
@@ -259,6 +261,20 @@ export async function createAgent(opts: AgentFactoryOptions): Promise<AgentFacto
       // On the first iteration, session.todos carries the persisted state.
       if (session.todos && todosRef.current.length === 0) {
         todosRef.current = session.todos
+      }
+
+      // Emit todo.updated so a client todo panel can live-update as the agent
+      // tracks progress (OpenCode parity). Fires only when the todo list
+      // actually changed — a resumed session that restores persisted todos but
+      // never calls todowrite again won't spam identical events per iteration.
+      const todoSignature = JSON.stringify(todosRef.current)
+      if (todosRef.current.length > 0 && todoSignature !== lastTodoSignature) {
+        lastTodoSignature = todoSignature
+        opts.bus?.emit({
+          kind: "todo.updated",
+          sessionId: session.id,
+          data: { todos: todosRef.current },
+        })
       }
 
       // Git snapshot tracking (fire-and-forget, matches OpenCode's async snapshot pattern).

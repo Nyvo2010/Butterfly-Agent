@@ -145,6 +145,17 @@ async function executeRun(
   } catch (err) {
     const message = (err as Error).message
     app.runState.error(sessionId, message, abort)
+    // Broadcast whatever the loop persisted before failing, so event-driven
+    // clients still receive the partial transcript (message.added) instead of
+    // being stranded on stream deltas with no reconciliation signal.
+    try {
+      const current = await app.sessionManager.load(sessionId)
+      if (current && current.messages.length > previousMessageCount) {
+        await app.sessionManager.save(current, { previousMessageCount })
+      }
+    } catch {
+      // Non-fatal — the store already has the partial messages persisted.
+    }
     return { sessionId, status: "error", error: message }
   } finally {
     // Resolve + drop any pending permission requests — the run is over, so

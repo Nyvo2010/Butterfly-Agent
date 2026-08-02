@@ -233,6 +233,72 @@ describe("@butterfly/server — SessionManager", () => {
     const listAll = await manager.list(true)
     expect(listAll).toHaveLength(2)
   })
+
+  it("editMessage emits message.updated with the edited content", async () => {
+    const session = await manager.create()
+    const loaded = await store.load(session.id)
+    if (loaded) {
+      loaded.messages = [
+        {
+          id: "m-edit",
+          role: "user",
+          content: "original",
+          timestamp: new Date().toISOString(),
+        },
+      ]
+      await store.save(loaded)
+    }
+
+    const events: ButterflyEvent[] = []
+    bus.subscribe((e) => events.push(e))
+    const updated = await manager.editMessage(session.id, "m-edit", "revised")
+    expect(updated?.messages[0].content).toBe("revised")
+
+    const updatedEvent = events.find((e) => e.kind === "message.updated")
+    expect(updatedEvent).toBeTruthy()
+    expect((updatedEvent?.data as { messageId: string; content: string }).messageId).toBe("m-edit")
+    expect((updatedEvent?.data as { messageId: string; content: string }).content).toBe("revised")
+  })
+
+  it("retry emits message.removed for truncated messages", async () => {
+    const session = await manager.create()
+    const loaded = await store.load(session.id)
+    if (loaded) {
+      loaded.messages = [
+        {
+          id: "m-user",
+          role: "user",
+          content: "do it",
+          timestamp: new Date().toISOString(),
+        },
+        {
+          id: "m-assistant",
+          role: "assistant",
+          content: "here you go",
+          timestamp: new Date().toISOString(),
+        },
+        {
+          id: "m-tool",
+          role: "tool",
+          content: "result",
+          toolCallId: "tc-1",
+          timestamp: new Date().toISOString(),
+        },
+      ]
+      await store.save(loaded)
+    }
+
+    const events: ButterflyEvent[] = []
+    bus.subscribe((e) => events.push(e))
+    const prep = await manager.retry(session.id)
+    expect(prep?.query).toBe("do it")
+
+    const removedEvents = events.filter((e) => e.kind === "message.removed")
+    expect(removedEvents).toHaveLength(2) // assistant + tool messages
+    const removedIds = removedEvents.map((e) => (e.data as { messageId: string }).messageId)
+    expect(removedIds).toContain("m-assistant")
+    expect(removedIds).toContain("m-tool")
+  })
 })
 
 // ─── Session helpers ──────────────────────────────────────────────────────────

@@ -1,7 +1,11 @@
+import { randomUUID } from "node:crypto"
 import type { Tool, ToolContext, ToolResult } from "../types"
 
 /** Mirrors OpenCode's TodoItem shape. Structurally compatible with @butterfly/session TodoItem. */
 export interface TodoItem {
+  /** Stable id — assigned on first write, preserved across updates by
+   *  content match so clients can reconcile todo.updated events. */
+  id?: string
   content: string
   status: "pending" | "in_progress" | "completed" | "cancelled"
   priority: "high" | "medium" | "low"
@@ -66,11 +70,20 @@ export function createTodowriteTool(deps: TodowriteToolDeps): Tool {
         return { kind: "err", message: "todos must be an array" }
       }
 
-      const todos: TodoItem[] = rawTodos.map((t) => ({
-        content: String(t.content ?? ""),
-        status: (t.status as TodoItem["status"]) ?? "pending",
-        priority: (t.priority as TodoItem["priority"]) ?? "medium",
-      }))
+      const current = deps.getTodos()
+      // Reconcile ids: items matching an existing todo by content keep their
+      // stable id; brand-new items get a fresh one. Clients rely on ids to
+      // track which item changed across todo.updated events.
+      const idForContent = new Map(current.map((t) => [t.content, t.id]))
+      const todos: TodoItem[] = rawTodos.map((t) => {
+        const content = String(t.content ?? "")
+        return {
+          id: idForContent.get(content) ?? `todo-${randomUUID()}`,
+          content,
+          status: (t.status as TodoItem["status"]) ?? "pending",
+          priority: (t.priority as TodoItem["priority"]) ?? "medium",
+        }
+      })
 
       // Validate: at most one in_progress
       const inProgress = todos.filter((t) => t.status === "in_progress")

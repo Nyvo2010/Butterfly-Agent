@@ -371,6 +371,11 @@ export class SessionManager {
       sessionId: id,
       data: { fields: ["messages"] },
     })
+    this.bus.emit({
+      kind: "message.updated",
+      sessionId: id,
+      data: { messageId, content },
+    })
     return updated
   }
 
@@ -386,6 +391,9 @@ export class SessionManager {
     if (lastUserIdx === -1) return null
 
     const kept = session.messages.slice(0, lastUserIdx + 1)
+    // The messages truncated away are the assistant/tool turns after the last
+    // user message — emit message.removed per message so clients drop them.
+    const removed = session.messages.slice(lastUserIdx + 1)
     const query = String(kept[kept.length - 1].content).replace(
       /^\[Project context:[^\]]*\]\s*/,
       "",
@@ -397,6 +405,13 @@ export class SessionManager {
     }
     await this.store.save(updated)
     this.bus.emit({ kind: "session.updated", sessionId: id, data: { fields: ["messages"] } })
+    for (const m of removed) {
+      this.bus.emit({
+        kind: "message.removed",
+        sessionId: id,
+        data: { messageId: m.id, count: removed.length },
+      })
+    }
     return { query }
   }
 }

@@ -128,10 +128,39 @@ for (const req of pending) {
   (per-session) are SSE streams. Each event carries an `id` — resume with
   `Last-Event-ID` after a reconnect (the server replays the last 500 events).
 
-Event kinds: `session.*` (incl. `session.imported`), `run.*` (incl.
-`run.recovered` after a restart sweep), `stream.text_delta` (live tokens),
-`stream.reasoning`, `stream.usage`, `tool.*`, `file.changed`, `message.added`,
-`permission.*`, `mcp.*`.
+#### Event contract
+
+Every event has the shape `{ id, kind, sessionId, timestamp, data }`. Kinds:
+
+| Kind | When | `data` highlights |
+|---|---|---|
+| `session.created/updated/deleted/archived/forked/imported` | session lifecycle | `session` |
+| `run.started/completed/aborted/error/recovered` | run lifecycle | `run` metadata |
+| `stream.text_delta` | **live streaming** — emitted per token chunk during generation | `{ text }` |
+| `stream.reasoning` | live reasoning tokens | `{ text }` |
+| `stream.usage` | per-step token/cost totals | `{ promptTokens, completionTokens, totalTokens, costUsd? }` |
+| `tool.start/result/error` | tool execution | tool name, input, output/error |
+| `file.changed` | write/patch/delete applied | `{ filePath, change }` |
+| `message.added` | **persisted** — emitted once at run end (or on edit) with the full message | `{ message }` |
+| `message.updated` | `PATCH /messages/:id` edited a message | `{ messageId, message }` |
+| `message.removed` | `POST /retry` truncated the tail (rewritten messages) | `{ count }` |
+| `todo.updated` | the agent maintains a todo list via `todowrite` (live progress panel) | `{ todos }` |
+| `permission.requested/resolved` | HITL permission flow | request + reply |
+| `mcp.*` | MCP server lifecycle | server name, status |
+
+Streaming guidance for client builders:
+
+1. **Live text** comes from `stream.text_delta` — accumulate deltas into the
+   assistant message currently being generated.
+2. **Final truth** is `message.added`, which fires once per new message after a
+   run completes (or when you edit via the API). Build your message list from
+   these, not from deltas.
+3. **Todo panels** subscribe to `todo.updated`. Each `TodoItem` carries a stable
+   `id` (preserved across updates by content match), so you can reconcile which
+   item changed instead of diffing by text. Events fire only when the todo list
+   actually changes — no spam for tool-only or resumed sessions.
+4. **Edits and retries** surface as `message.updated` / `message.removed` so
+   clients can rewrite or prune rendered messages instead of full refetches.
 
 ### Option 3 — ACP (Agent Client Protocol over stdio)
 

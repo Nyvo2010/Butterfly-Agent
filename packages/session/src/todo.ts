@@ -11,6 +11,9 @@
  */
 
 export interface TodoItem {
+  /** Stable id — assigned by the todowrite tool, used by clients to
+   *  reconcile todo.updated events (OpenCode parity). */
+  id?: string
   content: string
   status: "pending" | "in_progress" | "completed" | "cancelled"
   priority: "high" | "medium" | "low"

@@ -19,6 +19,7 @@
  */
 
 import { EventEmitter } from "node:events"
+import type { TodoItem } from "@butterfly/session"
 import { EventReplayBuffer, type EventReplayOptions } from "./event-replay"
 
 // ─── Event types ──────────────────────────────────────────────────────────────
@@ -54,7 +55,10 @@ export type ToolEventKind = "tool.start" | "tool.result" | "tool.error"
 export type FileEventKind = "file.changed"
 
 /** Persisted session message events. */
-export type MessageEventKind = "message.added"
+export type MessageEventKind = "message.added" | "message.updated" | "message.removed"
+
+/** Todo / plan list events (mirrors OpenCode's todo.updated for live todo panels). */
+export type TodoEventKind = "todo.updated"
 
 /** Permission request event kinds (human-in-the-loop). */
 export type PermissionEventKind = "permission.requested" | "permission.resolved"
@@ -70,6 +74,7 @@ export type ButterflyEventKind =
   | ToolEventKind
   | FileEventKind
   | MessageEventKind
+  | TodoEventKind
   | PermissionEventKind
   | MCPEventKind
 
@@ -208,6 +213,22 @@ export interface MessageAddedEvent extends ButterflyEventBase {
     timestamp: string
   }
 }
+export interface MessageUpdatedEvent extends ButterflyEventBase {
+  kind: "message.updated"
+  sessionId: string
+  data: { messageId: string; content: string }
+}
+export interface MessageRemovedEvent extends ButterflyEventBase {
+  kind: "message.removed"
+  sessionId: string
+  data: { messageId: string; count?: number }
+}
+
+export interface TodoUpdatedEvent extends ButterflyEventBase {
+  kind: "todo.updated"
+  sessionId: string
+  data: { todos: TodoItem[] }
+}
 
 export interface PermissionRequestedEvent extends ButterflyEventBase {
   kind: "permission.requested"
@@ -255,6 +276,9 @@ export type ButterflyEvent =
   | ToolErrorEvent
   | FileChangedEvent
   | MessageAddedEvent
+  | MessageUpdatedEvent
+  | MessageRemovedEvent
+  | TodoUpdatedEvent
   | PermissionRequestedEvent
   | PermissionResolvedEvent
   | MCPConnectedEvent
@@ -283,6 +307,9 @@ export const EVENT_CATEGORIES = {
   "tool.error": "tool",
   "file.changed": "file",
   "message.added": "message",
+  "message.updated": "message",
+  "message.removed": "message",
+  "todo.updated": "todo",
   "permission.requested": "permission",
   "permission.resolved": "permission",
   "mcp.connected": "mcp",
