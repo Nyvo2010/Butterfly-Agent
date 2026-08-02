@@ -70,6 +70,12 @@ export interface SessionUsage {
   usageAvailable: boolean
   /** Number of LLM calls made. */
   callCount: number
+  /**
+   * Estimated total cost in USD, accumulated across all LLM calls.
+   * Computed from the model's catalog pricing (per-1M-token input/output).
+   * Undefined when pricing is unknown for the model(s) used.
+   */
+  costUsd?: number
 }
 
 export interface FileChange {
@@ -138,6 +144,7 @@ export function zeroUsage(): SessionUsage {
     totalTokens: 0,
     usageAvailable: false,
     callCount: 0,
+    costUsd: 0,
   }
 }
 

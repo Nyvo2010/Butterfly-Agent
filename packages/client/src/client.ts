@@ -233,6 +233,14 @@ export class ButterflyClient {
     return this.request("/api/sessions/import", { method: "POST", body: data })
   }
 
+  /**
+   * List available slash commands defined in the server config.
+   * Returns a map of command name → prompt template.
+   */
+  commands(): Promise<{ commands: Record<string, string> }> {
+    return this.request("/api/sessions/commands")
+  }
+
   // ── Prompt / run ─────────────────────────────────────────────────────────
 
   /**

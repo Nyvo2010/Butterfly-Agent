@@ -68,9 +68,21 @@ curl -X POST http://127.0.0.1:3000/api/sessions/<id>/prompt?wait=true \
 ```bash
 pnpm typecheck   # tsc across all packages
 pnpm lint        # biome check
-pnpm test        # vitest (146+ tests)
+pnpm test        # vitest (224+ tests)
+pnpm build       # compile all packages
 pnpm format      # biome format
 ```
+
+### Live LLM integration tests (opt-in)
+
+The default suite uses mock LLMs (deterministic, free). To exercise the real
+provider path (streaming, retries, tool-call parsing) against a live API:
+
+```bash
+BUTTERFLY_TEST_LIVE=1 LLM_API_KEY=sk-... npx vitest run tests/live-llm.test.ts
+```
+
+Skipped automatically when `BUTTERFLY_TEST_LIVE` is unset or no key is present.
 
 ---
 
@@ -201,6 +213,57 @@ catalog and uses 70% of it (min 1000, fallback 8000). So a 128k model isn't crus
 into an 8k budget, and a small 7B model with an 8k window still fits. Explicit config
 always wins.
 
+## Slash commands & file references
+
+Two client-facing conveniences are built into the backend, ready for any UI:
+
+### Slash commands
+
+Define custom commands in `.butterfly/config.json` under the `commands` key.
+Each maps a `/name` to a prompt template; `{args}` is replaced by the rest of
+the user's input after the command name:
+
+```jsonc
+{
+  "commands": {
+    "fix": "Fix the following issue in the codebase: {args}",
+    "test": "Write tests for: {args}",
+    "explain": "Explain this code in detail: {args}",
+    "deploy": "Deploy the project now."
+  }
+}
+```
+
+- A prompt of `/fix the login bug` is rewritten to
+  `Fix the following issue in the codebase: the login bug` before the loop runs.
+- Unknown commands pass through unchanged.
+- Clients can discover available commands via `GET /api/sessions/commands`.
+
+### External file references
+
+Reference files in any prompt with `@path/to/file.ts`. The server extracts the
+references, reads the files (workspace-bound, 1MB cap), and injects their
+content into the first user message as a `REFERENCED FILES:` block — the model
+sees the code without an explicit read call:
+
+```
+"Refactor @src/utils.ts and @src/index.ts to share a helper"
+```
+
+- Files are resolved against the server `cwd`; absolute paths work too.
+- Missing or oversized files are skipped with an inline `[SKIPPED: …]` notice.
+- Multi-turn: the `@path` text stays in the query so the model can still `read`
+  the file itself if it wants.
+
+## Cost tracking
+
+Each session accumulates an estimated `costUsd` alongside token counts,
+computed from the model's catalog pricing (per-1M-token input/output).
+Configured provider model overrides take precedence over catalog prices (useful
+for proxies/self-hosted gateways). Visible in `session.usage.costUsd` and on
+`/api/sessions` lists. Unknown pricing leaves the field unset rather than
+misleading the user.
+
 ## Session safety
 
 - **No silent deletion**: sessions are never auto-deleted by default. Enable
@@ -298,6 +361,7 @@ See [`.env.example`](./.env.example) for the annotated list. Key ones:
 | `/api/sessions/:id/restore` | POST | Restore working tree to a git snapshot |
 | `/api/sessions/:id/messages/:messageId` | PATCH | Edit a message's content |
 | `/api/sessions/:id/retry` | POST | Truncate to last user message + re-run |
+| `/api/sessions/commands` | GET | List configured slash commands |
 | `/api/sessions/search` | GET | Search sessions by title/content |
 | `/api/sessions/import` | POST | Import a session from export JSON |
 | `/api/search` | GET | Symbol-level code search (identifier index) |
@@ -335,7 +399,7 @@ See [`.env.example`](./.env.example) for the annotated list. Key ones:
 │   ├── server/              # HTTP server entry point
 │   └── acp/                 # ACP stdio server entry point
 ├── docs/                    # SCE.md, COE.md
-└── tests/                   # Vitest suite (146+ tests)
+└── tests/                   # Vitest suite (224+ tests incl. opt-in live LLM)
 ```
 
 ## License

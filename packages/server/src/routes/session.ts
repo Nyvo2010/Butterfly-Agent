@@ -12,12 +12,43 @@ import { getSnapshotService } from "@butterfly/agent"
 import { isPathInWorkspace } from "@butterfly/tools"
 import { runSessionPrompt } from "../agent-run"
 import type { ServerApp } from "../app"
+
+/**
+ * Extract external file references from a prompt string.
+ * Matches patterns like @path/to/file.ts (word characters, dots, slashes, hyphens).
+ * Returns unique, deduplicated paths relative to the workspace.
+ */
+export function extractRefs(prompt: string): string[] {
+  const refs: string[] = []
+  const seen = new Set<string>()
+  // Match @ followed by a file path (word chars, dots, slashes, hyphens)
+  const re = /@([\w./-]+(?:\.\w+))/g
+  let match: RegExpExecArray | null
+  while (true) {
+    match = re.exec(prompt)
+    if (match === null) break
+    const path = match[1]
+    if (!seen.has(path)) {
+      seen.add(path)
+      refs.push(path)
+    }
+  }
+  return refs
+}
+
 import { decodeCursor, encodeCursor, isAfterCursor, isAfterCursorDesc, parseLimit } from "../cursor"
 import { unifiedDiffForFile } from "../diff"
 import type { Router } from "../router"
 import { accepted, badRequest, created, json, notFound, ok } from "../router"
 
 export function registerSessionRoutes(router: Router, app: ServerApp): void {
+  // ── List available slash commands ─────────────────────────────────────
+  // Registered BEFORE /api/sessions/:id so the static "commands" segment wins.
+  router.get("/api/sessions/commands", async (ctx) => {
+    const commands = app.butterflyConfig.commands ?? {}
+    ok(ctx.res, { commands }, ctx.corsHeaders)
+  })
+
   // ── Search sessions (by title / summary / message content) ────────────
   // Registered BEFORE /api/sessions/:id so the static "search" segment wins.
   router.get("/api/sessions/search", async (ctx) => {
@@ -379,10 +410,21 @@ export function registerSessionRoutes(router: Router, app: ServerApp): void {
   // ── Run agent (POST /api/sessions/:id/prompt) ──────────────────────────
   router.post("/api/sessions/:id/prompt", async (ctx) => {
     const sessionId = ctx.params.id
-    const query = String(ctx.body.prompt ?? ctx.body.query ?? "")
+    let query = String(ctx.body.prompt ?? ctx.body.query ?? "")
     if (!query.trim()) {
       badRequest(ctx.res, "prompt is required")
       return
+    }
+
+    // Extract external file references (@path patterns) from the prompt.
+    // The agent loop will read these and inject their content into context.
+    const refs = extractRefs(query)
+    if (refs.length > 0) {
+      // Strip the @path references from the query so the model sees clean text.
+      // The file content is injected as a separate context block.
+      for (const ref of refs) {
+        query = query.replace(`@${ref}`, ref)
+      }
     }
 
     const waitForCompletion = ctx.body.async === false || ctx.query.wait === "true"
@@ -394,6 +436,7 @@ export function registerSessionRoutes(router: Router, app: ServerApp): void {
       prompt: query,
       maxSteps,
       temperature,
+      refs: refs.length > 0 ? refs : undefined,
       async: !waitForCompletion,
     })
 

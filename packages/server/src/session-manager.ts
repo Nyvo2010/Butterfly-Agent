@@ -102,6 +102,8 @@ export function accumulateUsage(session: SessionState, usage: LLMUsage): Session
     totalTokens: current.totalTokens + usage.totalTokens,
     usageAvailable: current.usageAvailable || usage.usageAvailable,
     callCount: current.callCount + 1,
+    // Preserve the accumulated cost (may be undefined if pricing is unknown).
+    costUsd: current.costUsd,
   }
   return { ...session, usage: next, updatedAt: new Date().toISOString() }
 }

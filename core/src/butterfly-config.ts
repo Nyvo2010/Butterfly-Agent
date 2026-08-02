@@ -165,6 +165,22 @@ export interface ButterflyConfig {
   permission?: ButterflyPermissionConfig
   /** API key for server authentication. When set, all API requests require Authorization header. */
   apiKey?: string
+  /**
+   * Custom slash commands. Each key is a command name (e.g. "fix", "test") and
+   * the value is the prompt template sent to the agent when the user types
+   * "/<name>" plus any additional arguments. The template can use {args} as a
+   * placeholder for the rest of the user's input after the command name.
+   *
+   * Example:
+   *   "commands": {
+   *     "fix": "Fix the following issue in the codebase: {args}",
+   *     "test": "Write tests for: {args}",
+   *     "explain": "Explain the following code in detail: {args}"
+   *   }
+   *
+   * A future client can discover available commands via /api/commands.
+   */
+  commands?: Record<string, string>
   /** Butterfly-specific extensions. */
   butterfly?: {
     /** Tiered model mapping for ModelRouter. */
@@ -448,6 +464,15 @@ function validateButterflyConfig(raw: Record<string, unknown>): ButterflyConfig 
       expected: "string",
       got: typeof raw.apiKey,
     })
+  if (typeof raw.commands === "object" && raw.commands !== null && !Array.isArray(raw.commands)) {
+    config.commands = raw.commands as Record<string, string>
+  } else if (raw.commands !== undefined) {
+    log("warn", "config.invalid_type", {
+      field: "commands",
+      expected: "object",
+      got: typeof raw.commands,
+    })
+  }
   if (
     typeof raw.permission === "object" &&
     raw.permission !== null &&

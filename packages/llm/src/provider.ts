@@ -319,6 +319,38 @@ export class ProviderService {
   }
 
   /**
+   * Resolve per-1M-token USD pricing for a model, when known.
+   *
+   * Priority:
+   * 1. Configured provider model override (user's butterfly.json "providers"
+   *    key — they may run a proxy with different pricing).
+   * 2. models.dev catalog pricing.
+   * 3. undefined (unknown model → callers skip cost tracking).
+   */
+  async costFor(model: string): Promise<{ input: number; output: number } | undefined> {
+    const prefix = model.split("/")[0]
+    const bare = bareModelId(model)
+
+    // 1. Configured override wins (proxy pricing, self-hosted gateways).
+    const cfgModel = this.providers?.[prefix]?.models?.[bare]
+    if (cfgModel?.cost) return cfgModel.cost
+
+    // 2. Catalog pricing (bounded wait so cost never blocks a run).
+    try {
+      const providers = await withTimeout(
+        getModelsDevCatalog().getCatalog(),
+        750,
+        {} as Record<string, never>,
+      )
+      const info = providers[prefix]?.models?.[bare]
+      if (info?.cost) return { input: info.cost.input, output: info.cost.output }
+    } catch {
+      // Fall through — unknown pricing.
+    }
+    return undefined
+  }
+
+  /**
    * Resolve a sensible COE context budget (tokens) for a model.
    *
    * Small-model focus: when the catalog knows the model's context window, the
@@ -335,10 +367,7 @@ export class ProviderService {
     // The catalog lookup can hit the network on a cold start (models.dev fetch).
     // Bounding the wait keeps the first prompt snappy; the catalog is cached on
     // disk afterward, so subsequent calls resolve from cache instantly.
-    const limit = await Promise.race([
-      this.contextLimitFor(model),
-      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), timeoutMs)),
-    ])
+    const limit = await withTimeout(this.contextLimitFor(model), timeoutMs, undefined)
     if (limit === undefined) return fallback
     return Math.max(1000, Math.floor(limit * fraction))
   }
@@ -408,5 +437,26 @@ export class ProviderService {
         })
       }
     }
+  }
+}
+
+// ── Module helpers ────────────────────────────────────────────────────────────
+
+/**
+ * Race a promise against a timeout, resolving to `fallback` when the timeout
+ * fires first. The timer is always cleared so repeated calls (per LLM response)
+ * never accumulate dangling timers that keep the event loop alive.
+ */
+async function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), ms)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
   }
 }

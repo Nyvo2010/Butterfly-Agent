@@ -1,4 +1,4 @@
-import { access, readFile } from "node:fs/promises"
+import { access, readFile, stat } from "node:fs/promises"
 import { resolve } from "node:path"
 import type { COE, Compressor, SCE, SCEOptions } from "@butterfly/context"
 import { log } from "@butterfly/core"
@@ -165,6 +165,30 @@ export interface RunRequest {
   llmRequestHeaders?: Record<string, string>
   /** Extra body fields forwarded to the LLM provider. */
   llmRequestBody?: Record<string, unknown>
+  /**
+   * Custom slash commands for prompt pre-processing. When the query starts with
+   * "/", the loop resolves it against this map and rewrites the query to the
+   * command's prompt template (with {args} replaced by the remainder).
+   *
+   * Example: command "fix" → "Fix the following: {args}"
+   * User: "/fix the login button" → query becomes "Fix the following: the login button"
+   *
+   * A future client can discover these via GET /api/commands.
+   */
+  commands?: Record<string, string>
+  /**
+   * Pre-resolved external file references. Each entry is a path to a file that
+   * should be read and injected into the context as additional snippets.
+   *
+   * The server extracts these from the prompt (e.g. @path/to/file.ts) before
+   * passing to the loop. The loop reads the referred files and adds them to
+   * the SCE slice so the model sees their content without needing an explicit
+   * read tool call.
+   *
+   * Example: user writes "refactor @src/utils.ts" → server resolves @src/utils.ts
+   * and passes { refs: ["src/utils.ts"] }. The loop reads the file content.
+   */
+  refs?: string[]
 }
 
 export type StopReason =
@@ -291,6 +315,30 @@ export class AgentLoop {
 
   async run(req: RunRequest): Promise<RunResult> {
     if (!req.query?.trim()) throw new Error("query is required")
+    // ── Slash command resolution ───────────────────────────────────────
+    // If the query starts with "/<name>", resolve it against the configured
+    // commands map. The command's prompt template uses {args} as a placeholder
+    // for the remainder of the user's input.
+    if (req.commands && req.query.startsWith("/")) {
+      const firstSpace = req.query.indexOf(" ")
+      const cmdName = firstSpace === -1 ? req.query.slice(1) : req.query.slice(1, firstSpace)
+      const cmdArgs = firstSpace === -1 ? "" : req.query.slice(firstSpace + 1).trim()
+      const template = req.commands[cmdName]
+      if (template) {
+        const rewritten = template.replace("{args}", cmdArgs).trim()
+        log("info", "agent.slash_command", {
+          command: cmdName,
+          original: req.query.slice(0, 100),
+          rewritten: rewritten.slice(0, 200),
+        })
+        req = { ...req, query: rewritten }
+      } else {
+        log("warn", "agent.slash_command_unknown", {
+          command: cmdName,
+          available: Object.keys(req.commands),
+        })
+      }
+    }
     const maxSteps = req.maxSteps ?? 20
     const maxContextTokens = req.maxContextTokens ?? 8_000
     const workspaceRoots = req.workspaceRoots ?? [req.cwd]
@@ -308,7 +356,7 @@ export class AgentLoop {
       headers: req.llmRequestHeaders,
       body: req.llmRequestBody,
     }
-    let session = this.primeSession(req)
+    let session = await this.primeSession(req)
     let consecutiveSaveFailures = 0
 
     // Restore persisted todos from the session into the mutable ref on first load.
@@ -375,8 +423,8 @@ export class AgentLoop {
         llmExtras,
       )
 
-      // Accumulate usage
-      session = this.accumulateUsage(session, response)
+      // Accumulate usage + estimated cost
+      session = await this.accumulateUsage(session, response, lastResolution.model)
 
       // Step 6: Parse text response as tool calls (parser-based LLMs)
       if (response.kind === "text" && this.deps.parser) {
@@ -497,19 +545,46 @@ export class AgentLoop {
   // ── Private: Session initialization ──────────────────────────────────────
 
   /** Prime an empty session with the user's query as the first user turn. */
-  private primeSession(req: RunRequest): SessionState {
+  private async primeSession(req: RunRequest): Promise<SessionState> {
     let session = req.session
     if (session.messages.length === 0) {
       const bootstrapPrefix = req.bootstrapSummary
         ? `[Project context: ${req.bootstrapSummary}]\n\n`
         : ""
+      // ── External file references ───────────────────────────────────
+      // Resolve @path references in the query by reading the files and
+      // injecting them as context right after the query.
+      let refsBlock = ""
+      if (req.refs && req.refs.length > 0) {
+        const refContents: string[] = []
+        for (const refPath of req.refs) {
+          const abs = refPath.startsWith("/") ? refPath : resolve(req.cwd, refPath)
+          try {
+            const st = await stat(abs)
+            if (st.size > 1024 * 1024) {
+              refContents.push(
+                `[SKIPPED: ${refPath} — file too large (${(st.size / 1024).toFixed(0)}KB)]`,
+              )
+              continue
+            }
+            const content = await readFile(abs, "utf8")
+            refContents.push(`--- ${refPath} ---\n${content}`)
+          } catch {
+            refContents.push(`[SKIPPED: ${refPath} — could not read]`)
+          }
+        }
+        if (refContents.length > 0) {
+          refsBlock = `\n\nREFERENCED FILES:\n${refContents.join("\n\n")}`
+        }
+      }
+
       session = {
         ...session,
         messages: [
           {
             id: "msg-user-query",
             role: "user",
-            content: `${bootstrapPrefix}${req.query}`,
+            content: `${bootstrapPrefix}${req.query}${refsBlock}`,
             timestamp: new Date().toISOString(),
           },
         ],
@@ -694,19 +769,39 @@ export class AgentLoop {
 
   // ── Private: Usage accumulation ───────────────────────────────────────────
 
-  private accumulateUsage(session: SessionState, response: LLMResponse): SessionState {
+  private async accumulateUsage(
+    session: SessionState,
+    response: LLMResponse,
+    model: string,
+  ): Promise<SessionState> {
     if (!response.usage?.usageAvailable) return session
     const cur = session.usage ?? zeroUsage()
-    const next = {
-      ...session,
-      usage: {
-        promptTokens: cur.promptTokens + response.usage.promptTokens,
-        completionTokens: cur.completionTokens + response.usage.completionTokens,
-        totalTokens: cur.totalTokens + response.usage.totalTokens,
-        usageAvailable: true,
-        callCount: cur.callCount + 1,
-      },
+    const usage = {
+      promptTokens: cur.promptTokens + response.usage.promptTokens,
+      completionTokens: cur.completionTokens + response.usage.completionTokens,
+      totalTokens: cur.totalTokens + response.usage.totalTokens,
+      usageAvailable: true,
+      callCount: cur.callCount + 1,
+      costUsd: cur.costUsd ?? 0,
     }
+
+    // Estimate cost from model pricing (best-effort, never blocks the loop).
+    let costKnown = false
+    if (this.deps.providerService) {
+      try {
+        const price = await this.deps.providerService.costFor(model)
+        if (price) {
+          costKnown = true
+          const promptCost = (response.usage.promptTokens / 1_000_000) * price.input
+          const completionCost = (response.usage.completionTokens / 1_000_000) * price.output
+          usage.costUsd = Math.round((usage.costUsd + promptCost + completionCost) * 1e6) / 1e6
+        }
+      } catch {
+        // Cost is best-effort — never let pricing failure break the run.
+      }
+    }
+
+    const next = { ...session, usage }
     this.deps.bus?.emit({
       kind: "stream.usage",
       sessionId: session.id,
@@ -714,6 +809,7 @@ export class AgentLoop {
         promptTokens: response.usage.promptTokens,
         completionTokens: response.usage.completionTokens,
         totalTokens: response.usage.totalTokens,
+        ...(costKnown ? { costUsd: usage.costUsd } : {}),
       },
     })
     return next

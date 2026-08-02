@@ -19,6 +19,12 @@ export interface RunSessionPromptOptions {
   temperature?: number
   /** When true (default), return immediately and run in the background. */
   async?: boolean
+  /**
+   * Pre-resolved external file references extracted from the prompt.
+   * The agent loop reads these files and injects their content into the
+   * initial user message as additional context.
+   */
+  refs?: string[]
 }
 
 export interface RunSessionPromptResult {
@@ -50,6 +56,7 @@ async function executeRun(
   maxSteps: number | undefined,
   abort: AbortController,
   temperature?: number,
+  refs?: string[],
 ): Promise<RunSessionPromptResult> {
   const previousMessageCount = session.messages.length
   let agent: AgentFactoryResult | undefined
@@ -90,6 +97,8 @@ async function executeRun(
             topFiles: sceOpts.topFiles,
           }
         : undefined,
+      commands: app.butterflyConfig.commands,
+      refs,
       bootstrapSummary: agent.bootstrapSummary || undefined,
     })
 
@@ -162,7 +171,7 @@ export async function runSessionPrompt(
   app: ServerApp,
   opts: RunSessionPromptOptions,
 ): Promise<RunSessionPromptResult> {
-  const { sessionId, prompt, maxSteps, temperature } = opts
+  const { sessionId, prompt, maxSteps, temperature, refs } = opts
   const runAsync = opts.async !== false
 
   let session = await app.sessionManager.load(sessionId)
@@ -193,11 +202,13 @@ export async function runSessionPrompt(
   }
 
   if (runAsync) {
-    void executeRun(app, sessionId, session, prompt, maxSteps, abort, temperature).catch((err) => {
-      app.runState.error(sessionId, (err as Error).message, abort)
-    })
+    void executeRun(app, sessionId, session, prompt, maxSteps, abort, temperature, refs).catch(
+      (err) => {
+        app.runState.error(sessionId, (err as Error).message, abort)
+      },
+    )
     return { sessionId, status: "running" }
   }
 
-  return executeRun(app, sessionId, session, prompt, maxSteps, abort, temperature)
+  return executeRun(app, sessionId, session, prompt, maxSteps, abort, temperature, refs)
 }
