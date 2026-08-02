@@ -1,42 +1,59 @@
 import { mkdirSync } from "node:fs"
+import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import type { SessionStore } from "./store"
 import type { SessionState } from "./types"
 
 // better-sqlite3 is an optional dependency. The store will throw
 // a clear error at construction time if it's not installed.
-// Uses a duck-typed interface to avoid requiring type declarations.
+// Uses a typed interface to avoid @ts-expect-error throughout.
 
-interface DuckSQLiteDB {
+interface SQLiteDB {
   pragma(s: string): void
   exec(sql: string): void
-  prepare(sql: string): {
-    run(...args: unknown[]): unknown
-    get(...args: unknown[]): unknown
-    all(...args: unknown[]): unknown[]
-  }
+  prepare(sql: string): SQLiteStatement
   close(): void
+  checkpoint(): void
 }
 
-let DB: (new (path: string) => DuckSQLiteDB) | null = null
+interface SQLiteStatement {
+  run(...args: unknown[]): { changes: number }
+  get(...args: unknown[]): unknown
+  all(...args: unknown[]): unknown[]
+}
 
-async function loadDB(): Promise<new (path: string) => DuckSQLiteDB> {
-  if (DB) return DB
+interface SQLiteConstructor {
+  new (path: string, options?: { readonly?: boolean; timeout?: number }): SQLiteDB
+}
+
+let DBCtor: SQLiteConstructor | null = null
+
+async function loadDBCtor(): Promise<SQLiteConstructor> {
+  if (DBCtor) return DBCtor
   try {
-    // Dynamic import for optional dependency.
-    // @ts-expect-error - better-sqlite3 is an optional dependency
-    const mod = await import("better-sqlite3")
-    DB = mod.default ?? (mod as unknown as new (path: string) => DuckSQLiteDB)
-    if (typeof DB !== "function") {
+    // @ts-expect-error - optional dependency, may not be installed
+    const mod = (await import("better-sqlite3").catch(() => null)) as {
+      default?: SQLiteConstructor
+    } | null
+    const Ctor = mod?.default ?? (mod as unknown as SQLiteConstructor | null)
+    if (typeof Ctor !== "function") {
       throw new Error("better-sqlite3 module did not export a constructor")
     }
+    DBCtor = Ctor
+    return Ctor
   } catch (err) {
+    if (err instanceof Error && err.message.includes("did not export")) throw err
     throw new Error(
-      "SQLiteSessionStore requires better-sqlite3. Install it with: pnpm add better-sqlite3\n" +
+      "SQLiteSessionStore requires better-sqlite3. Install it with: pnpm add better-sqlite3, " +
+        "then remove the @ts-expect-error directive above the import.\n" +
         `Original error: ${(err as Error).message}`,
     )
   }
-  return DB
+}
+
+/** Default path for the SQLite database. */
+export function defaultSQLitePath(): string {
+  return join(homedir(), ".butterfly", "sessions.db")
 }
 
 const SCHEMA_SQL = `
@@ -64,7 +81,7 @@ const MIGRATIONS: Array<{ version: number; sql: string }> = [
   { version: 1, sql: SCHEMA_SQL },
 ]
 
-function runMigrations(db: DuckSQLiteDB): void {
+function runMigrations(db: SQLiteDB): void {
   // Ensure schema_version table exists (created in SCHEMA_SQL for fresh DBs,
   // but may be missing on very old databases).
   db.exec("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
@@ -87,25 +104,25 @@ function runMigrations(db: DuckSQLiteDB): void {
 }
 
 export class SQLiteSessionStore implements SessionStore {
-  private db: DuckSQLiteDB | null = null
+  private db: SQLiteDB | null = null
   private initialized = false
   private readonly dbPath: string
   private readonly onError: (msg: string) => void
 
   constructor(dbPath?: string, onError?: (msg: string) => void) {
     this.onError = onError ?? ((msg) => console.error(msg))
-    this.dbPath = dbPath ?? join(process.env.HOME ?? "/tmp", ".butterfly", "sessions.db")
+    this.dbPath = dbPath ?? defaultSQLitePath()
   }
 
-  private async ensureInit(): Promise<DuckSQLiteDB> {
+  private async ensureInit(): Promise<SQLiteDB> {
     if (this.initialized && this.db) return this.db
-    const Ctor = await loadDB()
+    const Ctor = await loadDBCtor()
     try {
       mkdirSync(dirname(this.dbPath), { recursive: true })
     } catch {
       // Directory may already exist.
     }
-    this.db = new Ctor(this.dbPath)
+    this.db = new Ctor(this.dbPath, { timeout: 5000 })
     this.db.pragma("journal_mode = WAL")
     this.db.pragma("foreign_keys = ON")
     runMigrations(this.db)
@@ -190,9 +207,19 @@ export class SQLiteSessionStore implements SessionStore {
     }
   }
 
+  /**
+   * Close the database connection after running a WAL checkpoint.
+   * Safe to call multiple times.
+   */
   close(): void {
     try {
       if (this.db) {
+        // Run WAL checkpoint to truncate the WAL file before closing.
+        try {
+          this.db.pragma("wal_checkpoint(TRUNCATE)")
+        } catch {
+          // Checkpoint is best-effort.
+        }
         this.db.close()
         this.db = null
         this.initialized = false

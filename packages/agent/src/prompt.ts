@@ -25,6 +25,11 @@ export interface PromptInput {
    * Default false — native tool-calling models get tools via API.
    */
   includeToolList?: boolean
+  /**
+   * Loop-detector notices to inject this turn (repeat/wander corrections).
+   * Mirrors Atomic Agent's `### notice` injection.
+   */
+  notices?: string[]
 }
 
 export interface BuiltPrompt {
@@ -74,6 +79,9 @@ export function buildSystemPrompt(input: PromptInput): BuiltPrompt {
     "- Do NOT call the same tool with the same arguments more than once — if a tool fails, try a different approach or report the error.",
     "- Be concise. Complete the task in as few steps as possible.",
     planBlock,
+    ...(input.notices && input.notices.length > 0
+      ? ["", "IMPORTANT NOTICES:", ...input.notices.map((n) => `  - ${n}`), ""]
+      : []),
     "EDITING GUIDELINES:",
     "- Prefer patch/diff_patch over write when modifying existing files. Only use write for new files.",
     "- Before editing any file, read it first to understand its current contents.",

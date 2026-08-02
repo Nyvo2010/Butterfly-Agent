@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+build/
+.turbo/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitattributes
+
+# Testing
+coverage/
+
+# Logs
+*.log
+
+# Butterfly runtime data
+.butterfly/sessions/
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore

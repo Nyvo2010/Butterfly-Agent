@@ -11,7 +11,7 @@
 
 import { log } from "@butterfly/core"
 
-export interface TodoItem {
+export interface PlanTodo {
   /** Unique identifier for this todo. */
   id: string
   /** Human-readable task description. */
@@ -26,7 +26,7 @@ export interface TodoItem {
 
 export interface Plan {
   /** Ordered list of todo items. */
-  todos: TodoItem[]
+  todos: PlanTodo[]
   /** When the plan was created. */
   createdAt: string
   /** Brief description of the overall goal. */
@@ -41,7 +41,7 @@ export interface Plan {
  * and treats them as todo items.
  */
 export function extractPlanFromText(text: string, goal: string): Plan {
-  const todos: TodoItem[] = []
+  const todos: PlanTodo[] = []
   const now = new Date().toISOString()
 
   // Match markdown checkboxes: - [ ] task or - [x] task
@@ -78,16 +78,32 @@ export function extractPlanFromText(text: string, goal: string): Plan {
 }
 
 /**
- * Format a plan as text for injection into the system prompt.
+ * Format a plan as a running anchor for injection into the system prompt.
+ *
+ * Inspired by SmallCode's plan-tracker: the plan is re-injected every turn as
+ * an "ACTIVE PLAN (step N of M)" block with ✓/→ markers so the model always
+ * knows where it is — even after context eviction trims early turns.
  */
 export function formatPlanForPrompt(plan: Plan): string {
   if (plan.todos.length === 0) return ""
-  const lines = ["CURRENT PLAN:", `Goal: ${plan.goal}`, ""]
-  for (const todo of plan.todos) {
-    const marker = todo.completed ? "[x]" : "[ ]"
-    lines.push(`  - ${marker} ${todo.task}`)
-  }
-  lines.push("", "Progress: mark completed items with [x]. Update the plan as needed.")
+  const total = plan.todos.length
+  const completed = plan.todos.filter((t) => t.completed).length
+  // Current step = first incomplete todo (1-based); if all done, show total.
+  const currentIdx = plan.todos.findIndex((t) => !t.completed)
+  const currentStep = currentIdx === -1 ? total : currentIdx + 1
+
+  const lines = [`ACTIVE PLAN (step ${currentStep} of ${total}):`, `Goal: ${plan.goal}`, ""]
+  plan.todos.forEach((todo, i) => {
+    let marker = "  "
+    if (todo.completed) marker = "✓ "
+    else if (i === currentIdx) marker = "→ "
+    lines.push(`  ${marker}${i + 1}. ${todo.task}`)
+  })
+  lines.push(
+    "",
+    `Progress: ${completed}/${total} complete. Advance the plan as steps finish — ` +
+      "mark completed items and continue with the next unmarked step.",
+  )
   return lines.join("\n")
 }
 

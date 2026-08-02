@@ -31,6 +31,7 @@ export const planExitTool: Tool = {
       const answer = await ctx.onAskUser(
         `Plan complete: ${planSummary}\n\nSwitch to build mode to start implementing?`,
         ["Yes, switch to build mode", "No, continue planning"],
+        { tool: "plan_exit", category: "plan" },
       )
       if (answer?.includes("switch")) {
         return {

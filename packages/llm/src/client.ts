@@ -13,7 +13,7 @@
 
 import { AnthropicClient } from "./anthropic-adapter"
 import { GeminiClient } from "./gemini-adapter"
-import type { LLMClient } from "./types"
+import type { LLMClient, ModelRequestOverrideMap } from "./types"
 import { VercelAILLMClient } from "./vercel-adapter"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -160,6 +160,22 @@ export const PROVIDER_ENV_VARS: Record<string, string> = {
   vercel: "VERCEL_API_KEY",
 }
 
+// ─── Model id helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Extract the bare model id from a possibly-prefixed model string.
+ *
+ * Model references may arrive as "provider/model" (e.g. "anthropic/claude-sonnet-4-5")
+ * from the router/tier mapping, while the underlying provider APIs expect only the
+ * model id ("claude-sonnet-4-5"). Mirrors the prefix-stripping in `createClient`
+ * (first segment only), so openrouter-style "provider/org/model" ids are preserved.
+ */
+export function bareModelId(model: string): string {
+  const idx = model.indexOf("/")
+  if (idx === -1) return model
+  return model.slice(idx + 1)
+}
+
 // ─── Client factory ───────────────────────────────────────────────────────────
 
 /**
@@ -241,6 +257,21 @@ export function createClient(
   }
 }
 
+/** Build the per-model request override map from a provider config. */
+function buildModelOverrides(providerCfg: ProviderConfig): ModelRequestOverrideMap {
+  const overrides: ModelRequestOverrideMap = {}
+  if (!providerCfg.models) return overrides
+  for (const [modelId, model] of Object.entries(providerCfg.models)) {
+    if (model.request && (model.request.headers || model.request.body)) {
+      overrides[modelId] = {
+        headers: model.request.headers,
+        body: model.request.body,
+      }
+    }
+  }
+  return overrides
+}
+
 /** Create a client from a specific provider config entry. */
 function createClientFromConfig(
   providerCfg: ProviderConfig,
@@ -249,18 +280,24 @@ function createClientFromConfig(
 ): LLMClient {
   const apiKey = providerCfg.apiKey || cfg.apiKey
   const baseURL = providerCfg.baseURL || PROVIDER_PROFILES[providerCfg.provider]?.baseURL
+  const modelOverrides = buildModelOverrides(providerCfg)
+  const options = providerCfg.options ?? {}
 
   switch (providerCfg.provider) {
     case "anthropic":
       return new AnthropicClient({
         apiKey,
         model: modelId || undefined,
+        options,
+        modelOverrides,
       })
     case "gemini":
     case "google":
       return new GeminiClient({
         apiKey,
         model: modelId || undefined,
+        options,
+        modelOverrides,
       })
     // OpenAI and all compatible providers use the Vercel AI SDK client.
     case "openai":
@@ -285,11 +322,15 @@ function createClientFromConfig(
       return new VercelAILLMClient({
         apiKey,
         baseUrl: baseURL || cfg.baseUrl || undefined,
+        options,
+        modelOverrides,
       })
     default:
       return new VercelAILLMClient({
         apiKey,
         baseUrl: baseURL || cfg.baseUrl || undefined,
+        options,
+        modelOverrides,
       })
   }
 }

@@ -1,5 +1,5 @@
 export { FileSystemSessionStore } from "./fs-store"
-export { SQLiteSessionStore } from "./sqlite-store"
+export { defaultSQLitePath, SQLiteSessionStore } from "./sqlite-store"
 export type { SessionStore } from "./store"
 export { InMemorySessionStore } from "./store"
 export type { TodoItem } from "./todo"

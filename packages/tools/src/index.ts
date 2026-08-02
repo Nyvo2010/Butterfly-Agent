@@ -1,5 +1,15 @@
 export { formatFile } from "./formatter"
-export { connectAllMCPServers, disconnectAllMCPServers, resetMCPConnections } from "./mcp"
+export type { MCPServerStatus } from "./mcp"
+export {
+  connectAllMCPServers,
+  connectMCPServer,
+  disconnectAllMCPServers,
+  disconnectMCPServer,
+  getMCPTools,
+  isMCPConnected,
+  listMCPServerStatus,
+  resetMCPConnections,
+} from "./mcp"
 export type { PluginContext } from "./plugins"
 export { activateAllPlugins, deactivateAllPlugins } from "./plugins"
 export { ToolRegistry } from "./registry"
@@ -35,4 +45,5 @@ export type { TodoItem } from "./tools/todowrite"
 export { createTodowriteTool } from "./tools/todowrite"
 export { webFetchTool } from "./tools/webfetch"
 export { writeTool } from "./tools/write"
-export type { Tool, ToolKind } from "./types"
+export type { AskUserCallback, PermissionCategory, Tool, ToolKind } from "./types"
+export { isPathInWorkspace } from "./types"

@@ -6,36 +6,75 @@
  * SessionManager which emits events on the bus.
  */
 
+import { writeFile } from "node:fs/promises"
+import { isAbsolute, resolve } from "node:path"
+import { getSnapshotService } from "@butterfly/agent"
+import { isPathInWorkspace } from "@butterfly/tools"
+import { runSessionPrompt } from "../agent-run"
 import type { ServerApp } from "../app"
+import { decodeCursor, encodeCursor, isAfterCursor, isAfterCursorDesc, parseLimit } from "../cursor"
+import { unifiedDiffForFile } from "../diff"
 import type { Router } from "../router"
-import { badRequest, created, json, notFound, ok } from "../router"
-import { requestPermission } from "./permission"
+import { accepted, badRequest, created, json, notFound, ok } from "../router"
 
 export function registerSessionRoutes(router: Router, app: ServerApp): void {
-  // ── List sessions ──────────────────────────────────────────────────────
+  // ── Search sessions (by title / summary / message content) ────────────
+  // Registered BEFORE /api/sessions/:id so the static "search" segment wins.
+  router.get("/api/sessions/search", async (ctx) => {
+    const q = String(ctx.query.q ?? "")
+    if (!q.trim()) {
+      badRequest(ctx.res, "q is required", ctx.corsHeaders)
+      return
+    }
+    const limit = parseLimit(ctx.query.limit, 20)
+    const results = await app.sessionManager.search(q, limit)
+    ok(ctx.res, { query: q, results }, ctx.corsHeaders)
+  })
+
+  // ── Import session (from export JSON) ─────────────────────────────────
+  router.post("/api/sessions/import", async (ctx) => {
+    const session = await app.sessionManager.import(ctx.body.session ?? ctx.body)
+    if (!session) {
+      badRequest(ctx.res, "Invalid session data: expected exported session JSON", ctx.corsHeaders)
+      return
+    }
+    created(ctx.res, { session }, ctx.corsHeaders)
+  })
+
+  // ── List sessions (cursor-paginated) ──────────────────────────────────
   router.get("/api/sessions", async (ctx) => {
     const includeArchived = ctx.query.archived === "true"
+    const limit = parseLimit(ctx.query.limit)
+    const cursor = decodeCursor(ctx.query.cursor)
     const entries = await app.sessionManager.list(includeArchived)
-    // Enrich with title + usage summary for the client.
-    const sessions = []
+    // Entries are already sorted by updatedAt desc (see FileSystemSessionStore.list).
+    const page = []
     for (const entry of entries) {
+      // Sessions are sorted newest-first (updatedAt desc) — use desc cursor.
+      if (cursor && !isAfterCursorDesc({ id: entry.id, time: entry.updatedAt }, cursor)) continue
       const session = await app.sessionManager.load(entry.id)
-      if (session) {
-        sessions.push({
-          id: session.id,
-          mode: session.mode,
-          tier: session.tier,
-          title: session.title ?? "Untitled",
-          selectedModel: session.selectedModel ?? "auto",
-          updatedAt: session.updatedAt,
-          startedAt: session.startedAt,
-          usage: session.usage,
-          archived: session.archived ?? false,
-          parentSessionId: session.parentSessionId,
-        })
-      }
+      if (!session) continue
+      page.push({
+        id: session.id,
+        mode: session.mode,
+        tier: session.tier,
+        title: session.title ?? "Untitled",
+        selectedModel: session.selectedModel ?? "auto",
+        updatedAt: session.updatedAt,
+        startedAt: session.startedAt,
+        usage: session.usage,
+        archived: session.archived ?? false,
+        parentSessionId: session.parentSessionId,
+      })
+      if (page.length >= limit) break
     }
-    ok(ctx.res, { sessions })
+    const last = page.at(-1)
+    ok(ctx.res, {
+      sessions: page,
+      ...(last
+        ? { nextCursor: encodeCursor({ id: last.id, time: last.updatedAt }) }
+        : { nextCursor: null }),
+    })
   })
 
   // ── Create session ─────────────────────────────────────────────────────
@@ -130,14 +169,29 @@ export function registerSessionRoutes(router: Router, app: ServerApp): void {
     ok(ctx.res, { session })
   })
 
-  // ── Get session messages ───────────────────────────────────────────────
+  // ── Get session messages (cursor-paginated) ────────────────────────────
   router.get("/api/sessions/:id/messages", async (ctx) => {
     const session = await app.sessionManager.load(ctx.params.id)
     if (!session) {
       notFound(ctx.res, `Session not found: ${ctx.params.id}`)
       return
     }
-    ok(ctx.res, { messages: session.messages })
+    const limit = parseLimit(ctx.query.limit)
+    const cursor = decodeCursor(ctx.query.cursor)
+    const messages = session.messages
+    const page = []
+    for (const m of messages) {
+      if (cursor && !isAfterCursor({ id: m.id, time: m.timestamp }, cursor)) continue
+      page.push(m)
+      if (page.length >= limit) break
+    }
+    const last = page.at(-1)
+    ok(ctx.res, {
+      messages: page,
+      ...(last
+        ? { nextCursor: encodeCursor({ id: last.id, time: last.timestamp }) }
+        : { nextCursor: null }),
+    })
   })
 
   // ── Get session tool calls ─────────────────────────────────────────────
@@ -160,12 +214,166 @@ export function registerSessionRoutes(router: Router, app: ServerApp): void {
     ok(ctx.res, { fileChanges: session.fileChanges })
   })
 
-  // ── Get session run status ─────────────────────────────────────────────
+  // ── Get session run status (honest: running / idle / interrupted) ─────
   router.get("/api/sessions/:id/status", async (ctx) => {
-    ok(ctx.res, {
+    const session = await app.sessionManager.load(ctx.params.id)
+    if (!session) {
+      notFound(ctx.res, `Session not found: ${ctx.params.id}`, ctx.corsHeaders)
+      return
+    }
+    const live = app.runState.status(ctx.params.id)
+    if (live === "running") {
+      ok(ctx.res, { sessionId: ctx.params.id, status: "running" }, ctx.corsHeaders)
+      return
+    }
+    // No live run, but a persisted marker exists → interrupted by restart.
+    if (session.activeRun) {
+      ok(
+        ctx.res,
+        {
+          sessionId: ctx.params.id,
+          status: "interrupted",
+          activeRun: session.activeRun,
+        },
+        ctx.corsHeaders,
+      )
+      return
+    }
+    ok(ctx.res, { sessionId: ctx.params.id, status: "idle" }, ctx.corsHeaders)
+  })
+
+  // ── Export session (portable JSON) ────────────────────────────────────
+  router.get("/api/sessions/:id/export", async (ctx) => {
+    const exported = await app.sessionManager.export(ctx.params.id)
+    if (!exported) {
+      notFound(ctx.res, `Session not found: ${ctx.params.id}`, ctx.corsHeaders)
+      return
+    }
+    ok(ctx.res, exported, ctx.corsHeaders)
+  })
+
+  // ── Unified diff of session file changes ──────────────────────────────
+  router.get("/api/sessions/:id/diff", async (ctx) => {
+    const session = await app.sessionManager.load(ctx.params.id)
+    if (!session) {
+      notFound(ctx.res, `Session not found: ${ctx.params.id}`, ctx.corsHeaders)
+      return
+    }
+    const diffs = session.fileChanges.map((c) => ({
+      path: c.path,
+      kind: c.kind,
+      at: c.at,
+      diff: unifiedDiffForFile(c.path, c.before, c.after),
+    }))
+    ok(ctx.res, { sessionId: ctx.params.id, diffs }, ctx.corsHeaders)
+  })
+
+  // ── Revert specific file changes (undo to before-state) ───────────────
+  router.post("/api/sessions/:id/revert", async (ctx) => {
+    const session = await app.sessionManager.load(ctx.params.id)
+    if (!session) {
+      notFound(ctx.res, `Session not found: ${ctx.params.id}`, ctx.corsHeaders)
+      return
+    }
+    const targetPaths = Array.isArray(ctx.body.paths)
+      ? (ctx.body.paths as string[]).map((p) => String(p))
+      : undefined
+
+    const restored: string[] = []
+    const notFoundPaths: string[] = []
+    // Revert in reverse order so later changes undo first.
+    const changes = [...session.fileChanges].reverse()
+    for (const change of changes) {
+      if (targetPaths && !targetPaths.includes(change.path)) continue
+      const abs = isAbsolute(change.path) ? change.path : resolve(app.cwd, change.path)
+      // Workspace-bound + symlink-aware: never write outside the workspace.
+      if (!(await isPathInWorkspace(abs, [app.cwd]))) {
+        json(
+          ctx.res,
+          400,
+          { error: `revert denied: ${change.path} is outside the workspace` },
+          ctx.corsHeaders,
+        )
+        return
+      }
+      try {
+        if (change.before !== undefined) {
+          await writeFile(abs, change.before, "utf8")
+          restored.push(change.path)
+        } else {
+          notFoundPaths.push(change.path)
+        }
+      } catch (err) {
+        json(
+          ctx.res,
+          500,
+          { error: `Failed to revert ${change.path}: ${(err as Error).message}` },
+          ctx.corsHeaders,
+        )
+        return
+      }
+    }
+    for (const p of restored) {
+      app.bus.emit({
+        kind: "file.changed",
+        sessionId: ctx.params.id,
+        data: { path: p, changeKind: "revert" },
+      })
+    }
+    ok(ctx.res, { restored, missingBefore: notFoundPaths }, ctx.corsHeaders)
+  })
+
+  // ── Restore working tree to a snapshot (git-backed) ───────────────────
+  router.post("/api/sessions/:id/restore", async (ctx) => {
+    const snapshot = String(ctx.body.snapshot ?? "")
+    if (!snapshot) {
+      badRequest(ctx.res, "snapshot is required", ctx.corsHeaders)
+      return
+    }
+    try {
+      await getSnapshotService().restore(app.cwd, snapshot)
+      ok(ctx.res, { restored: snapshot }, ctx.corsHeaders)
+    } catch (err) {
+      json(ctx.res, 500, { error: `Restore failed: ${(err as Error).message}` }, ctx.corsHeaders)
+    }
+  })
+
+  // ── Edit a message's content ──────────────────────────────────────────
+  router.patch("/api/sessions/:id/messages/:messageId", async (ctx) => {
+    const content = String(ctx.body.content ?? "")
+    if (!content) {
+      badRequest(ctx.res, "content is required", ctx.corsHeaders)
+      return
+    }
+    const updated = await app.sessionManager.editMessage(
+      ctx.params.id,
+      ctx.params.messageId,
+      content,
+    )
+    if (!updated) {
+      notFound(ctx.res, `Session or message not found`, ctx.corsHeaders)
+      return
+    }
+    ok(ctx.res, { session: updated }, ctx.corsHeaders)
+  })
+
+  // ── Retry: truncate to last user message and re-run ───────────────────
+  router.post("/api/sessions/:id/retry", async (ctx) => {
+    const prep = await app.sessionManager.retry(ctx.params.id)
+    if (!prep) {
+      badRequest(ctx.res, "No user message to retry", ctx.corsHeaders)
+      return
+    }
+    const result = await runSessionPrompt(app, {
       sessionId: ctx.params.id,
-      status: app.runState.status(ctx.params.id),
+      prompt: prep.query,
+      async: true,
     })
+    if (result.status === "running") {
+      accepted(ctx.res, result, ctx.corsHeaders)
+      return
+    }
+    ok(ctx.res, result, ctx.corsHeaders)
   })
 
   // ── Run agent (POST /api/sessions/:id/prompt) ──────────────────────────
@@ -177,96 +385,28 @@ export function registerSessionRoutes(router: Router, app: ServerApp): void {
       return
     }
 
-    let session = await app.sessionManager.load(sessionId)
-    if (!session) {
-      session = await app.sessionManager.create({ id: sessionId })
+    const waitForCompletion = ctx.body.async === false || ctx.query.wait === "true"
+    const maxSteps = ctx.body.maxSteps ? Number(ctx.body.maxSteps) : undefined
+    const temperature = typeof ctx.body.temperature === "number" ? ctx.body.temperature : undefined
+
+    const result = await runSessionPrompt(app, {
+      sessionId,
+      prompt: query,
+      maxSteps,
+      temperature,
+      async: !waitForCompletion,
+    })
+
+    if (result.status === "running") {
+      accepted(ctx.res, result)
+      return
     }
 
-    const { abort } = app.runState.start(sessionId)
-
-    let agent: Awaited<ReturnType<typeof app.createAgent>> | undefined
-    try {
-      // Wire the human-in-the-loop permission system: the ask_user tool
-      // publishes a permission.requested event and blocks until the user
-      // responds via POST /api/permission/:id/reply.
-      agent = await app.createAgent({
-        sessionId,
-        onAskUser: (question, options) =>
-          requestPermission(app, sessionId, "ask_user", question, options),
-      })
-
-      const sceOpts = app.butterflyConfig.butterfly?.sce
-      const coeOpts = app.butterflyConfig.butterfly?.coe
-
-      const result = await agent.loop.run({
-        session,
-        query,
-        cwd: app.cwd,
-        maxSteps: ctx.body.maxSteps
-          ? Number(ctx.body.maxSteps)
-          : (app.butterflyConfig.butterfly?.maxSteps ?? 20),
-        maxContextTokens: coeOpts?.maxContextTokens ?? 8000,
-        toolMessageMaxTokens: coeOpts?.toolMessageMaxTokens,
-        signal: abort.signal,
-        sceOptions: sceOpts
-          ? {
-              maxFiles: sceOpts.maxFiles,
-              maxTokensPerFile: sceOpts.maxTokensPerFile,
-              maxGrepResults: sceOpts.maxGrepResults,
-              topFiles: sceOpts.topFiles,
-            }
-          : undefined,
-        bootstrapSummary: agent.bootstrapSummary || undefined,
-      })
-
-      await app.sessionManager.save(result.session)
-
-      // Distinguish aborted runs from normal completion: if the abort signal
-      // fired, the loop returned early — report it as aborted, not completed.
-      // Pass `abort` so runState only acts if this is still the active entry —
-      // a newer prompt's start() already cleaned up the old entry and emitted
-      // run.aborted, so we don't duplicate the event.
-      if (abort.signal.aborted) {
-        app.runState.abort(sessionId, abort)
-        ok(ctx.res, {
-          sessionId: result.session.id,
-          iterations: result.iterations,
-          stopReason: "aborted",
-          model: result.lastResolution.model,
-          tier: result.lastResolution.tier,
-          usage: result.session.usage,
-          fileChanges: result.session.fileChanges.map((f) => ({ path: f.path, kind: f.kind })),
-          toolCalls: result.session.toolCalls.map((t) => ({ name: t.name, error: t.error })),
-        })
-        return
-      }
-
-      app.runState.complete(
-        sessionId,
-        {
-          iterations: result.iterations,
-          stopReason: result.stopReason,
-          model: result.lastResolution.model,
-          tier: result.lastResolution.tier,
-        },
-        abort,
-      )
-
-      ok(ctx.res, {
-        sessionId: result.session.id,
-        iterations: result.iterations,
-        stopReason: result.stopReason,
-        model: result.lastResolution.model,
-        tier: result.lastResolution.tier,
-        usage: result.session.usage,
-        fileChanges: result.session.fileChanges.map((f) => ({ path: f.path, kind: f.kind })),
-        toolCalls: result.session.toolCalls.map((t) => ({ name: t.name, error: t.error })),
-      })
-    } catch (err) {
-      app.runState.error(sessionId, (err as Error).message, abort)
-      json(ctx.res, 500, { error: (err as Error).message })
-    } finally {
-      if (agent) await agent.dispose()
+    if (result.status === "error") {
+      json(ctx.res, 500, { error: result.error ?? "Agent run failed", ...result })
+      return
     }
+
+    ok(ctx.res, result)
   })
 }

@@ -19,6 +19,7 @@
  */
 
 import { EventEmitter } from "node:events"
+import { EventReplayBuffer, type EventReplayOptions } from "./event-replay"
 
 // ─── Event types ──────────────────────────────────────────────────────────────
 
@@ -29,18 +30,31 @@ export type SessionEventKind =
   | "session.deleted"
   | "session.archived"
   | "session.forked"
+  | "session.imported"
 
 /** Run (agent loop execution) lifecycle event kinds. */
-export type RunEventKind = "run.started" | "run.completed" | "run.aborted" | "run.error"
+export type RunEventKind =
+  | "run.started"
+  | "run.completed"
+  | "run.aborted"
+  | "run.error"
+  | "run.recovered"
 
-/** Streaming token deltas, assistant reasoning, and per-call usage. */
-export type StreamEventKind = "stream.text_delta" | "stream.reasoning" | "stream.usage"
+/** Streaming token deltas, assistant reasoning, per-call usage, and SSE bootstrap. */
+export type StreamEventKind =
+  | "stream.connected"
+  | "stream.text_delta"
+  | "stream.reasoning"
+  | "stream.usage"
 
 /** Tool execution event kinds. */
 export type ToolEventKind = "tool.start" | "tool.result" | "tool.error"
 
 /** File change event kinds. */
 export type FileEventKind = "file.changed"
+
+/** Persisted session message events. */
+export type MessageEventKind = "message.added"
 
 /** Permission request event kinds (human-in-the-loop). */
 export type PermissionEventKind = "permission.requested" | "permission.resolved"
@@ -55,6 +69,7 @@ export type ButterflyEventKind =
   | StreamEventKind
   | ToolEventKind
   | FileEventKind
+  | MessageEventKind
   | PermissionEventKind
   | MCPEventKind
 
@@ -102,6 +117,11 @@ export interface SessionForkedEvent extends ButterflyEventBase {
   sessionId: string
   data: { parentSessionId: string }
 }
+export interface SessionImportedEvent extends ButterflyEventBase {
+  kind: "session.imported"
+  sessionId: string
+  data: { sourceId: string; messageCount: number }
+}
 
 export interface RunStartedEvent extends ButterflyEventBase {
   kind: "run.started"
@@ -127,7 +147,17 @@ export interface RunErrorEvent extends ButterflyEventBase {
   sessionId: string
   data: { message: string }
 }
+export interface RunRecoveredEvent extends ButterflyEventBase {
+  kind: "run.recovered"
+  sessionId: string
+  data: { startedAt: string; query?: string; model?: string }
+}
 
+export interface StreamConnectedEvent extends ButterflyEventBase {
+  kind: "stream.connected"
+  sessionId?: string
+  data: Record<string, never>
+}
 export interface StreamTextDeltaEvent extends ButterflyEventBase {
   kind: "stream.text_delta"
   sessionId: string
@@ -166,10 +196,23 @@ export interface FileChangedEvent extends ButterflyEventBase {
   data: { path: string; changeKind: string }
 }
 
+export interface MessageAddedEvent extends ButterflyEventBase {
+  kind: "message.added"
+  sessionId: string
+  data: {
+    messageId: string
+    role: string
+    content: string
+    parts?: unknown
+    toolCallId?: string
+    timestamp: string
+  }
+}
+
 export interface PermissionRequestedEvent extends ButterflyEventBase {
   kind: "permission.requested"
   sessionId: string
-  data: { requestId: string; tool: string; question: string; options?: string[] }
+  data: { requestId: string; tool: string; question: string; options?: string[]; category: string }
 }
 export interface PermissionResolvedEvent extends ButterflyEventBase {
   kind: "permission.resolved"
@@ -197,10 +240,13 @@ export type ButterflyEvent =
   | SessionDeletedEvent
   | SessionArchivedEvent
   | SessionForkedEvent
+  | SessionImportedEvent
   | RunStartedEvent
   | RunCompletedEvent
   | RunAbortedEvent
   | RunErrorEvent
+  | RunRecoveredEvent
+  | StreamConnectedEvent
   | StreamTextDeltaEvent
   | StreamReasoningEvent
   | StreamUsageEvent
@@ -208,6 +254,7 @@ export type ButterflyEvent =
   | ToolResultEvent
   | ToolErrorEvent
   | FileChangedEvent
+  | MessageAddedEvent
   | PermissionRequestedEvent
   | PermissionResolvedEvent
   | MCPConnectedEvent
@@ -221,10 +268,13 @@ export const EVENT_CATEGORIES = {
   "session.deleted": "session",
   "session.archived": "session",
   "session.forked": "session",
+  "session.imported": "session",
   "run.started": "run",
   "run.completed": "run",
   "run.aborted": "run",
   "run.error": "run",
+  "run.recovered": "run",
+  "stream.connected": "stream",
   "stream.text_delta": "stream",
   "stream.reasoning": "stream",
   "stream.usage": "stream",
@@ -232,6 +282,7 @@ export const EVENT_CATEGORIES = {
   "tool.result": "tool",
   "tool.error": "tool",
   "file.changed": "file",
+  "message.added": "message",
   "permission.requested": "permission",
   "permission.resolved": "permission",
   "mcp.connected": "mcp",
@@ -265,10 +316,12 @@ export function _resetEventIdCounter(): void {
  */
 export class EventBus {
   private readonly emitter = new EventEmitter<{ event: [ButterflyEvent] }>()
+  private readonly replayBuffer: EventReplayBuffer
   /** Max listeners — bumped high enough for many SSE clients per process. */
   private readonly maxListeners = 200
 
-  constructor() {
+  constructor(replayOptions?: EventReplayOptions) {
+    this.replayBuffer = new EventReplayBuffer(replayOptions)
     this.emitter.setMaxListeners(this.maxListeners)
   }
 
@@ -298,7 +351,13 @@ export class EventBus {
       id: event.id ?? nextEventId(),
       timestamp: event.timestamp ?? new Date().toISOString(),
     } as ButterflyEvent
+    this.replayBuffer.append(full)
     this.emitter.emit("event", full)
+  }
+
+  /** Replay buffered events after `afterId` (exclusive). */
+  replay(afterId: string | undefined, sessionId?: string): ButterflyEvent[] {
+    return this.replayBuffer.replay(afterId, sessionId)
   }
 
   /** Subscribe to all events. Returns an unsubscribe function. */
@@ -344,6 +403,7 @@ export class EventBus {
   /** Remove all listeners (used in tests and on shutdown). */
   clear(): void {
     this.emitter.removeAllListeners("event")
+    this.replayBuffer.clear()
   }
 
   /** Current listener count (diagnostics). */

@@ -49,7 +49,11 @@ describe("@butterfly/server — EventBus", () => {
     bus.subscribeTo("run.started", (e) => events.push(e))
 
     bus.emit({ kind: "session.created", sessionId: "s1", data: { mode: "build", title: "T" } })
-    bus.emit({ kind: "run.started", sessionId: "s1" })
+    bus.emit({
+      kind: "run.started",
+      sessionId: "s1",
+      data: { query: "test", model: "m", tier: "standard" },
+    })
 
     expect(events).toHaveLength(1)
     expect(events[0].kind).toBe("run.started")
@@ -61,7 +65,11 @@ describe("@butterfly/server — EventBus", () => {
     bus.subscribeTo(["run.started", "run.completed"], (e) => events.push(e))
 
     bus.emit({ kind: "session.created", sessionId: "s1", data: { mode: "build", title: "T" } })
-    bus.emit({ kind: "run.started", sessionId: "s1" })
+    bus.emit({
+      kind: "run.started",
+      sessionId: "s1",
+      data: { query: "test", model: "m", tier: "standard" },
+    })
     bus.emit({ kind: "run.aborted", sessionId: "s1" })
     bus.emit({
       kind: "run.completed",
@@ -79,8 +87,16 @@ describe("@butterfly/server — EventBus", () => {
     const events: ButterflyEvent[] = []
     bus.subscribeToSession("s1", (e) => events.push(e))
 
-    bus.emit({ kind: "run.started", sessionId: "s1" })
-    bus.emit({ kind: "run.started", sessionId: "s2" })
+    bus.emit({
+      kind: "run.started",
+      sessionId: "s1",
+      data: { query: "test", model: "m", tier: "standard" },
+    })
+    bus.emit({
+      kind: "run.started",
+      sessionId: "s2",
+      data: { query: "test", model: "m", tier: "standard" },
+    })
     bus.emit({
       kind: "run.completed",
       sessionId: "s1",
@@ -416,13 +432,15 @@ describe("@butterfly/server — RunStateManager", () => {
 // ─── Permission Flow ─────────────────────────────────────────────────────────
 
 describe("@butterfly/server — permission flow", () => {
-  // requestPermission + reply round-trip is tested via direct imports since
-  // it requires the ServerApp type. We test the promise + resolve mechanics.
+  // requestPermission + reply round-trip is tested with a real permission
+  // store, mirroring how the HTTP route resolves a pending request.
   it("requestPermission resolves when reply is posted", async () => {
     const { requestPermission } = await import("../packages/server/src/routes/permission")
+    const { InMemoryPermissionStore } = await import("../packages/server/src/permission-store")
     const bus = new EventBus()
-    // Minimal app stub — only bus is needed by requestPermission.
-    const app = { bus } as never
+    const permissionStore = new InMemoryPermissionStore()
+    // Minimal app stub — requestPermission only needs bus + permissionStore.
+    const app = { bus, permissionStore } as never
 
     const events: ButterflyEvent[] = []
     bus.subscribe((e) => events.push(e))
@@ -439,28 +457,42 @@ describe("@butterfly/server — permission flow", () => {
     expect(requested?.sessionId).toBe("s1")
     const requestId = (requested?.data as { requestId: string }).requestId
 
-    // Simulate the user replying via the HTTP route by calling the resolve
-    // function stored in the pending map. We access it through the module's
-    // internal pending map by replying through a second import.
-    const { hasPendingPermissions } = await import("../packages/server/src/routes/permission")
-    expect(hasPendingPermissions("s1")).toBe(true)
+    // The pending entry should be visible in the store + via helper.
+    expect(permissionStore.get(requestId)).toBeTruthy()
+    expect(permissionStore.hasPendingForSession("s1")).toBe(true)
+    expect(permissionStore.list("s1")).toHaveLength(1)
 
-    // Resolve the promise by finding the pending entry and calling resolve.
-    // We use a small hack: the permission module stores pending requests in a
-    // module-level Map. We can't access it directly, so we test via the
-    // promise resolving when we call the reply handler.
-    // Instead, let's verify the promise is pending (hasn't resolved yet).
-    let resolved = false
-    permPromise.then(() => {
-      resolved = true
-    })
-    await new Promise((r) => setTimeout(r, 10))
-    expect(resolved).toBe(false) // still pending
+    // Simulate the user replying "yes" via the HTTP route by resolving the
+    // stored entry — the promise should resolve and events should fire.
+    const entry = permissionStore.get(requestId)
+    entry?.resolve("yes")
+    const answer = await permPromise
+    expect(answer).toBe("yes")
 
-    // Clean up: we can't easily call resolve without the internal map, so we
-    // just verify the pending state. The timeout test below covers cleanup.
-    // For now, verify the request was properly created.
-    expect(requestId).toBeTruthy()
+    const resolved = events.find((e) => e.kind === "permission.resolved")
+    expect(resolved).toBeTruthy()
+    expect((resolved?.data as { allowed: boolean }).allowed).toBe(true)
+  })
+
+  it("requestPermission times out and resolves null", async () => {
+    const { requestPermission } = await import("../packages/server/src/routes/permission")
+    const { InMemoryPermissionStore } = await import("../packages/server/src/permission-store")
+    const bus = new EventBus()
+    const permissionStore = new InMemoryPermissionStore()
+    const app = { bus, permissionStore } as never
+
+    const permPromise = requestPermission(
+      app,
+      "s2",
+      "bash",
+      'Allow "rm foo"?',
+      ["yes", "no"],
+      "ask_user",
+      25, // short timeout for the test
+    )
+    const answer = await permPromise
+    expect(answer).toBeNull()
+    expect(permissionStore.hasPendingForSession("s2")).toBe(false)
   })
 })
 
@@ -486,6 +518,8 @@ describe("@butterfly/server — Router", () => {
       query: {},
       body: {},
       pathname: "/health",
+      requestId: "req-test",
+      corsHeaders: {},
     })
     expect(called).toBe(true)
   })

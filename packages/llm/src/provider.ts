@@ -13,7 +13,7 @@
  * (plus an "auto" option that uses tiered routing from butterfly config).
  */
 
-import { createClient, type ProviderConfig } from "./client"
+import { bareModelId, createClient, type ProviderConfig } from "./client"
 import {
   type ModelInfo as CatalogModelInfo,
   getModelsDevCatalog,
@@ -296,6 +296,51 @@ export class ProviderService {
   /** Clear the client cache. */
   clearCache(): void {
     this.clientCache.clear()
+  }
+
+  /**
+   * Resolve a model's context window (tokens) from the catalog, when known.
+   * Returns undefined when the model is unknown or the catalog is unavailable
+   * (callers fall back to their configured/default budget).
+   */
+  async contextLimitFor(model: string): Promise<number | undefined> {
+    const prefix = model.split("/")[0]
+    const bare = bareModelId(model)
+    try {
+      const catalog = getModelsDevCatalog()
+      const providers = await catalog.getCatalog()
+      const provider = providers[prefix]
+      const info = provider?.models?.[bare]
+      const context = info?.limit?.context
+      return typeof context === "number" && context > 0 ? context : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Resolve a sensible COE context budget (tokens) for a model.
+   *
+   * Small-model focus: when the catalog knows the model's context window, the
+   * budget is a conservative fraction of it (so 128k models aren't crushed into
+   * an 8k budget). Unknown models fall back to `fallback` (default 8000), which
+   * matches the small-model-friendly COE default.
+   */
+  async contextBudgetFor(
+    model: string,
+    fallback = 8000,
+    fraction = 0.7,
+    timeoutMs = 750,
+  ): Promise<number> {
+    // The catalog lookup can hit the network on a cold start (models.dev fetch).
+    // Bounding the wait keeps the first prompt snappy; the catalog is cached on
+    // disk afterward, so subsequent calls resolve from cache instantly.
+    const limit = await Promise.race([
+      this.contextLimitFor(model),
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), timeoutMs)),
+    ])
+    if (limit === undefined) return fallback
+    return Math.max(1000, Math.floor(limit * fraction))
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────

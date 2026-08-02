@@ -1,20 +1,32 @@
 import { access, readFile } from "node:fs/promises"
 import { resolve } from "node:path"
-import type { COE, SCE, SCEOptions } from "@butterfly/context"
+import type { COE, Compressor, SCE, SCEOptions } from "@butterfly/context"
 import { log } from "@butterfly/core"
-import type {
-  LLMClient,
-  LLMMessage,
-  LLMResponse,
-  LLMStreamEvent,
-  LLMToolSpec,
-  ProviderService,
-  ToolCallParser,
+import {
+  classifyFailure,
+  type FailureCategory,
+  type LLMClient,
+  type LLMMessage,
+  type LLMResponse,
+  type LLMStream,
+  type LLMStreamEvent,
+  type LLMToolSpec,
+  type ProviderService,
+  sleep,
+  type ToolCallParser,
 } from "@butterfly/llm"
-import type { SessionState, SessionStore, TodoItem, ToolCallRecord } from "@butterfly/session"
+import type {
+  MessagePart,
+  SessionState,
+  SessionStore,
+  TodoItem,
+  ToolCallRecord,
+} from "@butterfly/session"
 import { zeroUsage } from "@butterfly/session"
 import type { Tool, ToolRegistry } from "@butterfly/tools"
 import { isCommandSafe } from "@butterfly/tools"
+import type { AskUserCallback } from "./ask-user"
+import { ToolLoopTracker } from "./loop-detector"
 import { kindsForMode } from "./modes"
 import type { Plan } from "./planning"
 import { extractPlanFromText, updatePlanFromToolResult } from "./planning"
@@ -24,11 +36,13 @@ import type { ModelResolution, ModelRouter } from "./router"
 
 /**
  * Permission hook called before executing a tool. Return false to deny execution.
- * The tool name and input are provided for user-interface decisions.
+ * The tool name, input, and (when known) the session id are provided for
+ * user-interface decisions and per-session approved-rule memory.
  */
 export type PermissionHook = (
   toolName: string,
   input: Record<string, unknown>,
+  sessionId?: string,
 ) => Promise<{ allowed: boolean; reason?: string }>
 
 /**
@@ -67,6 +81,34 @@ export interface AgentLoopDeps {
   permissionHook?: PermissionHook
   /** Optional quality monitor for pre-execution tool call validation. */
   qualityMonitor?: QualityMonitor
+  /**
+   * Loop detector for repeat/no-progress/wandering protection.
+   * When set, the loop consults it before each tool call, vetoes critical
+   * repeats, and injects notices into subsequent prompts. When absent, a
+   * fresh tracker is created per run.
+   */
+  loopDetector?: ToolLoopTracker
+  /**
+   * Semantic compressor for in-loop summarization. When set, COE uses it to
+   * summarize old messages instead of only dropping them — SmallCode/Atomic
+   * style context preservation for small context windows.
+   */
+  compressor?: Compressor
+  /** Max retries for transient LLM failures (rate limit, 5xx, timeout). Default 2. */
+  llmRetries?: number
+  /** Base backoff (ms) for transient LLM retries — doubles per attempt. Default 500. */
+  llmRetryBackoffMs?: number
+  /**
+   * Overall deadline for a streamed LLM completion (ms). Prevents a stalled
+   * provider connection from hanging the loop forever. Default 10 minutes.
+   */
+  llmStreamTimeoutMs?: number
+  /**
+   * Idle timeout for a streamed LLM completion (ms) — trips when no events
+   * arrive for this long, even if the overall deadline hasn't been reached.
+   * Default 90 seconds.
+   */
+  llmStreamIdleTimeoutMs?: number
   /** Optional streaming callback for live UI updates. */
   onStreamEvent?: (event: LLMStreamEvent) => void
   /** Optional callback after each iteration with current session state. */
@@ -82,7 +124,7 @@ export interface AgentLoopDeps {
    * Mirrors OpenCode's question tool pattern. When set, the ask_user tool
    * can pause execution to solicit user input.
    */
-  onAskUser?: (question: string, options?: string[]) => Promise<string | null>
+  onAskUser?: AskUserCallback
   /**
    * Optional mutable todo list ref. When set, the loop syncs the ref's
    * current value into the session before each save, and initializes it
@@ -115,6 +157,14 @@ export interface RunRequest {
    * path traversal outside the project. Defaults to [cwd] if not set.
    */
   workspaceRoots?: string[]
+  /** Per-request temperature override passed to the LLM. */
+  temperature?: number
+  /** Provider-specific options forwarded into the LLM request body. */
+  llmOptions?: Record<string, unknown>
+  /** Extra HTTP headers forwarded to the LLM provider. */
+  llmRequestHeaders?: Record<string, string>
+  /** Extra body fields forwarded to the LLM provider. */
+  llmRequestBody?: Record<string, unknown>
 }
 
 export type StopReason =
@@ -124,6 +174,8 @@ export type StopReason =
   | "max_messages"
   | "save_failure"
   | "aborted"
+  /** The loop detector tripped its breaker (consecutive vetoed repeats). */
+  | "loop_breaker"
 
 export interface RunResult {
   session: SessionState
@@ -183,6 +235,12 @@ interface CallResult {
   call: { id: string; name: string; input: unknown }
   tool: Tool | null
   error: boolean
+  /**
+   * Whether this failure should trigger model escalation.
+   * False for permission denials, quality blocks, and loop-detector vetoes
+   * (those are user/safety decisions, not model capability failures).
+   */
+  escalatable?: boolean
   result?: { kind: "ok"; output: unknown } | { kind: "err"; message: string }
   startedAt?: string
   finishedAt?: string
@@ -196,12 +254,27 @@ interface IterationState {
   fileChanges: SessionState["fileChanges"]
   readFiles: Set<string>
   stepHadFailure: boolean
+  /** Whether any failure this step was a model-capability failure (escalate). */
+  escalatableFailure: boolean
+  /** Loop-detector notices collected this step, injected into the next prompt. */
+  notices: string[]
+  /** Set when the loop detector's breaker trips — force a graceful reply. */
+  loopBreaker?: boolean
+  /** Final message text when the breaker trips. */
+  loopBreakerMessage?: string
 }
 
 // ── Agent Loop ───────────────────────────────────────────────────────────────
 
 export class AgentLoop {
+  /** Active loop detector for the current run (set in run()). */
+  private activeLoopDetector: ToolLoopTracker = new ToolLoopTracker()
+
   constructor(private readonly deps: AgentLoopDeps) {}
+
+  private get loopDetector(): ToolLoopTracker {
+    return this.activeLoopDetector
+  }
 
   /** Save session to store, returning whether the save succeeded. */
   private async saveSession(session: SessionState): Promise<boolean> {
@@ -221,6 +294,20 @@ export class AgentLoop {
     const maxSteps = req.maxSteps ?? 20
     const maxContextTokens = req.maxContextTokens ?? 8_000
     const workspaceRoots = req.workspaceRoots ?? [req.cwd]
+    // Per-run LLM request extras (temperature, options, headers, body) are
+    // captured in a local so concurrent run() calls on the same loop instance
+    // (e.g. the cached ACP agent) cannot race on shared state.
+    const llmExtras: {
+      temperature?: number
+      options?: Record<string, unknown>
+      headers?: Record<string, string>
+      body?: Record<string, unknown>
+    } = {
+      temperature: req.temperature,
+      options: req.llmOptions,
+      headers: req.llmRequestHeaders,
+      body: req.llmRequestBody,
+    }
     let session = this.primeSession(req)
     let consecutiveSaveFailures = 0
 
@@ -229,9 +316,13 @@ export class AgentLoop {
       this.deps.todosRef.current = session.todos
     }
 
+    // Loop detector — one per run so prior runs don't leak history into new ones.
+    this.activeLoopDetector = this.deps.loopDetector ?? new ToolLoopTracker()
+
     let lastResolution: ModelResolution = this.deps.router.resolve(session.tier, 0)
     let iteration = 0
     let escalationDepth = 0
+    let notices: string[] = []
 
     while (iteration < maxSteps) {
       const stepLog = { iteration, sessionId: session.id, mode: session.mode }
@@ -268,18 +359,21 @@ export class AgentLoop {
         return { session, lastResolution, iterations: iteration, stopReason: "max_messages" }
       }
 
-      // Step 4: Build prompt + tool specs
-      const { prompt, llmTools } = this.buildToolsAndPrompt(session, req, slice)
+      // Step 4: Build prompt + tool specs (loop-detector notices injected here)
+      const { prompt, llmTools } = this.buildToolsAndPrompt(session, req, slice, notices)
+      notices = []
 
-      // Step 5: Call LLM (streaming-first)
-      let response: LLMResponse
-      try {
-        response = await this.callLLM(session, lastResolution.model, prompt, llmTools, stepLog)
-      } catch (err) {
-        log("error", "agent.step.llm_error", { ...stepLog, error: (err as Error).message })
-        await this.saveSession(session)
-        throw err
-      }
+      // Step 5: Call LLM (streaming-first, with transient-failure retry inside).
+      // callLLM logs the classified error and persists state before throwing.
+      // `let` because the parser path below may re-type the response to tool_calls.
+      let response = await this.callLLM(
+        session,
+        lastResolution.model,
+        prompt,
+        llmTools,
+        stepLog,
+        llmExtras,
+      )
 
       // Accumulate usage
       session = this.accumulateUsage(session, response)
@@ -288,7 +382,12 @@ export class AgentLoop {
       if (response.kind === "text" && this.deps.parser) {
         const parsed = this.deps.parser.parse(response.text)
         if (parsed && parsed.length > 0) {
-          response = { kind: "tool_calls", calls: parsed, usage: response.usage }
+          response = {
+            kind: "tool_calls",
+            calls: parsed,
+            usage: response.usage,
+            reasoning: response.reasoning,
+          }
         }
       }
 
@@ -297,6 +396,7 @@ export class AgentLoop {
         const handled = await this.handleTextResponse(
           session,
           response.text,
+          response.reasoning,
           req,
           lastResolution,
           iteration,
@@ -311,7 +411,7 @@ export class AgentLoop {
         return handled.result
       }
 
-      // Step 7: Execute tool calls sequentially
+      // Step 7: Execute tool calls (parallel-safe reads run concurrently)
       const iterState = await this.executeToolCalls(session, response, req, workspaceRoots, stepLog)
 
       // Step 8: Collect results and build updated session
@@ -345,6 +445,22 @@ export class AgentLoop {
         this.updatePlanFromResults(req.plan, response.calls, iterState.callResults)
       }
 
+      // Loop-detector notices collected during execution flow into the next prompt.
+      if (iterState.notices.length > 0) notices = iterState.notices
+
+      // Loop breaker: repeated vetoes — force a graceful reply and stop.
+      if (iterState.loopBreaker) {
+        log("warn", "agent.stop.loop_breaker", { ...stepLog })
+        const finalMsg = appendAssistantText(session, iterState.loopBreakerMessage ?? "")
+        await this.saveSession(finalMsg)
+        return {
+          session: finalMsg,
+          lastResolution,
+          iterations: iteration + 1,
+          stopReason: "loop_breaker",
+        }
+      }
+
       // Abort check
       if (req.signal?.aborted) {
         log("info", "agent.stop.aborted", { ...stepLog })
@@ -352,8 +468,9 @@ export class AgentLoop {
         return { session, lastResolution, iterations: iteration + 1, stopReason: "aborted" }
       }
 
-      // Escalation on failure
-      if (iterState.stepHadFailure) {
+      // Escalation on real model-capability failures only.
+      // Permission denials, quality blocks, and loop vetoes do NOT escalate.
+      if (iterState.stepHadFailure && iterState.escalatableFailure) {
         const escalated = this.deps.router.escalate(session.tier, escalationDepth, selectedModel)
         escalationDepth = escalated.depth
         session = { ...session, tier: escalated.tier }
@@ -449,6 +566,7 @@ export class AgentLoop {
       const optimized = await this.deps.coe.optimize(session, {
         maxContextTokens,
         ...(toolMessageMaxTokens !== undefined ? { toolMessageMaxTokens } : {}),
+        ...(this.deps.compressor ? { compressor: this.deps.compressor } : {}),
       })
       return { ...optimized, updatedAt: new Date().toISOString() }
     }
@@ -461,6 +579,7 @@ export class AgentLoop {
     session: SessionState,
     req: RunRequest,
     slice: Awaited<ReturnType<SCE["select"]>>,
+    notices: string[] = [],
   ): { prompt: ReturnType<typeof buildSystemPrompt>; llmTools: LLMToolSpec[] } {
     const tools = this.deps.registry.listAllowed(kindsForMode(session.mode))
     const llmTools: LLMToolSpec[] = tools.map((t) => ({
@@ -476,6 +595,7 @@ export class AgentLoop {
       tools: toolMetas,
       plan: req.plan,
       includeToolList: this.deps.parser !== undefined,
+      notices,
     })
     return { prompt, llmTools }
   }
@@ -488,6 +608,12 @@ export class AgentLoop {
     prompt: ReturnType<typeof buildSystemPrompt>,
     llmTools: LLMToolSpec[],
     stepLog: Record<string, unknown>,
+    extras?: {
+      temperature?: number
+      options?: Record<string, unknown>
+      headers?: Record<string, string>
+      body?: Record<string, unknown>
+    },
   ): Promise<LLMResponse> {
     const llmMessages: LLMMessage[] = session.messages.map((m) => {
       if (m.role === "tool") return { role: "tool", content: m.content, toolCallId: m.toolCallId }
@@ -507,22 +633,63 @@ export class AgentLoop {
       system: prompt.system,
       messages: llmMessages,
       tools: llmTools.length > 0 ? llmTools : undefined,
+      ...(extras?.temperature !== undefined ? { temperature: extras.temperature } : {}),
+      ...(extras?.options ? { options: extras.options } : {}),
+      ...(extras?.headers ? { requestHeaders: extras.headers } : {}),
+      ...(extras?.body ? { requestBody: extras.body } : {}),
     }
 
-    let response: LLMResponse
-    if (llm.completeStream) {
-      response = await completeWithStream(llm, req, this.deps.onStreamEvent ?? (() => {}))
-    } else {
-      response = await llm.complete(req)
+    // Transient-failure retry with exponential backoff (Atomic-style reliability).
+    // Only retryable categories (rate_limit, timeout, server_error, network) retry;
+    // auth/model/context failures fail fast so escalation logic stays honest.
+    const maxRetries = this.deps.llmRetries ?? 2
+    const backoffMs = this.deps.llmRetryBackoffMs ?? 500
+    let lastError: unknown
+    let lastCategory: FailureCategory = "unknown"
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        let response: LLMResponse
+        if (llm.completeStream) {
+          response = await completeWithStream(llm, req, this.deps.onStreamEvent ?? (() => {}), {
+            timeoutMs: this.deps.llmStreamTimeoutMs,
+            idleTimeoutMs: this.deps.llmStreamIdleTimeoutMs,
+          })
+        } else {
+          response = await llm.complete(req)
+        }
+        log("info", "agent.step.llm_response", {
+          ...stepLog,
+          kind: response.kind,
+          usage: response.usage,
+          callCount: response.kind === "tool_calls" ? response.calls.length : 0,
+        })
+        return response
+      } catch (err) {
+        lastError = err
+        const classified = classifyFailure(err)
+        lastCategory = classified.category
+        if (!classified.retryable || attempt >= maxRetries) {
+          break
+        }
+        const wait = backoffMs * 2 ** attempt
+        log("warn", "agent.step.llm_retry", {
+          ...stepLog,
+          attempt: attempt + 1,
+          maxRetries,
+          category: classified.category,
+          backoffMs: wait,
+        })
+        await sleep(wait)
+      }
     }
-
-    log("info", "agent.step.llm_response", {
+    log("error", "agent.step.llm_error", {
       ...stepLog,
-      kind: response.kind,
-      usage: response.usage,
-      callCount: response.kind === "tool_calls" ? response.calls.length : 0,
+      error: (lastError as Error)?.message ?? String(lastError),
+      category: lastCategory,
+      retried: maxRetries,
     })
-    return response
+    await this.saveSession(session)
+    throw lastError
   }
 
   // ── Private: Usage accumulation ───────────────────────────────────────────
@@ -557,6 +724,7 @@ export class AgentLoop {
   private async handleTextResponse(
     session: SessionState,
     text: string,
+    reasoning: string | undefined,
     req: RunRequest,
     lastResolution: ModelResolution,
     iteration: number,
@@ -580,7 +748,7 @@ export class AgentLoop {
       }
     }
 
-    const finalSession = appendAssistantText(session, text)
+    const finalSession = appendAssistantText(session, text, reasoning)
     await this.saveSession(finalSession)
     return {
       restart: false,
@@ -595,6 +763,27 @@ export class AgentLoop {
 
   // ── Private: Execute tool calls ───────────────────────────────────────────
 
+  /**
+   * Tools that are safe to execute concurrently. Pure reads with no shared
+   * mutable state — mirrors Atomic Agent's `pure_read` resource class. Writes,
+   * execs, and user-interactive tools always run serially to keep behavior
+   * deterministic and approval flows ordered.
+   */
+  private isParallelSafe(call: { name: string }): boolean {
+    switch (call.name) {
+      case "read":
+      case "grep":
+      case "glob":
+      case "list":
+      case "search":
+      case "lsp":
+      case "web_fetch":
+        return true
+      default:
+        return false
+    }
+  }
+
   private async executeToolCalls(
     session: SessionState,
     response: LLMResponse & { kind: "tool_calls" },
@@ -608,23 +797,68 @@ export class AgentLoop {
       fileChanges: [...session.fileChanges],
       readFiles: new Set(session.readFiles),
       stepHadFailure: false,
+      escalatableFailure: false,
+      notices: [],
     }
 
-    // Append assistant's tool-call decision message
+    // Append assistant's tool-call decision message with structured parts.
     const toolCallNames = response.calls.map((c) => c.name).join(", ")
+    const assistantParts: MessagePart[] = []
+    if (response.reasoning) {
+      assistantParts.push({ type: "reasoning", text: response.reasoning })
+    }
+    assistantParts.push({ type: "text", text: `Using tools: ${toolCallNames}` })
+    for (const c of response.calls) {
+      assistantParts.push({ type: "tool_call", id: c.id, name: c.name, input: c.input })
+    }
     iterState.messages.push({
       id: `msg-assistant-step-${session.messages.length}`,
       role: "assistant",
       content: `Using tools: ${toolCallNames}`,
+      parts: assistantParts,
       timestamp: new Date().toISOString(),
       toolCallId: `atc-${session.messages.length}`,
     })
 
-    const callResults: CallResult[] = []
-    for (const call of response.calls) {
-      const cr = await this.executeOneTool(call, iterState, req, workspaceRoots, stepLog)
-      callResults.push(cr)
+    // Split into a parallel-safe batch + serial remainder, keeping original indices
+    // so results can be reassembled in model order for the transcript.
+    const parallelBatch: Array<{ call: (typeof response.calls)[number]; index: number }> = []
+    const serialCalls: Array<{ call: (typeof response.calls)[number]; index: number }> = []
+    response.calls.forEach((call, index) => {
+      if (this.isParallelSafe(call)) parallelBatch.push({ call, index })
+      else serialCalls.push({ call, index })
+    })
+
+    const callResults: CallResult[] = new Array<CallResult>(response.calls.length)
+
+    // Phase 1: execute the parallel-safe batch concurrently.
+    const parallelResults = await Promise.allSettled(
+      parallelBatch.map(({ call }) =>
+        this.executeOneTool(call, iterState, req, workspaceRoots, stepLog),
+      ),
+    )
+    for (let i = 0; i < parallelResults.length; i++) {
+      const r = parallelResults[i]
+      const index = parallelBatch[i].index
+      if (r.status === "fulfilled") {
+        callResults[index] = r.value
+      } else {
+        // A tool executor threw (shouldn't happen — tools return err results).
+        callResults[index] = {
+          call: parallelBatch[i].call,
+          tool: null,
+          error: true,
+          escalatable: false,
+          result: { kind: "err", message: (r.reason as Error)?.message ?? String(r.reason) },
+        }
+      }
     }
+
+    // Phase 2: execute the rest serially in model order.
+    for (const { call, index } of serialCalls) {
+      callResults[index] = await this.executeOneTool(call, iterState, req, workspaceRoots, stepLog)
+    }
+
     return { ...iterState, callResults }
   }
 
@@ -639,7 +873,38 @@ export class AgentLoop {
     const tool = this.deps.registry.get(call.name)
     if (!tool) {
       log("warn", "agent.step.tool_unknown", { ...stepLog, name: call.name })
-      return { call, tool: null, error: true }
+      return { call, tool: null, error: true, escalatable: false }
+    }
+
+    // Loop-detector pre-check — veto critical repeats before they execute.
+    const verdict = this.loopDetector.check(call.name, call.input)
+    if (verdict.level === "critical") {
+      const notice = this.loopDetector.noticeFor(verdict) ?? `Repeated failing action: ${call.name}`
+      iterState.notices.push(notice)
+      const breaker = this.loopDetector.registerVeto(verdict)
+      if (breaker) {
+        iterState.loopBreaker = true
+        iterState.loopBreakerMessage =
+          `I was unable to make progress — ${call.name} kept failing after ` +
+          `repeated attempts. Stopping here to avoid wasting more steps.`
+      }
+      log("warn", "agent.step.tool_vetoed", {
+        ...stepLog,
+        name: call.name,
+        detector: verdict.detector,
+        count: verdict.count,
+      })
+      return {
+        call,
+        tool,
+        error: true,
+        escalatable: false,
+        result: { kind: "err", message: `Tool call vetoed by loop detector: ${notice}` },
+      }
+    }
+    if (verdict.level === "warn") {
+      const notice = this.loopDetector.noticeFor(verdict)
+      if (notice) iterState.notices.push(notice)
     }
 
     // Permission check
@@ -647,7 +912,7 @@ export class AgentLoop {
       this.deps.permissionHook &&
       (tool.kind === "write" || tool.kind === "exec" || tool.kind === "delegate")
     ) {
-      const perm = await this.deps.permissionHook(tool.name, asRecord(call.input))
+      const perm = await this.deps.permissionHook(tool.name, asRecord(call.input), req.session.id)
       if (!perm.allowed) {
         log("info", "agent.step.permission_denied", {
           ...stepLog,
@@ -658,6 +923,7 @@ export class AgentLoop {
           call,
           tool,
           error: true,
+          escalatable: false,
           result: { kind: "err", message: perm.reason ?? `Permission denied for ${tool.name}` },
         }
       }
@@ -672,6 +938,7 @@ export class AgentLoop {
           call,
           tool,
           error: true,
+          escalatable: false,
           result: { kind: "err", message: `Quality check failed: ${qc.issues.join("; ")}` },
         }
       }
@@ -720,10 +987,15 @@ export class AgentLoop {
       iterState.readFiles.add(path)
     }
 
+    // Record the outcome with the loop detector (a success resets the streak).
+    this.loopDetector.record(call.name, call.input, result.kind === "ok")
+    if (result.kind === "ok") this.loopDetector.clearVetoes(verdict)
+
     return {
       call,
       tool,
       error: result.kind === "err",
+      escalatable: result.kind === "err",
       result,
       startedAt,
       finishedAt,
@@ -793,6 +1065,7 @@ export class AgentLoop {
       const { call, tool, error, result: res, startedAt, finishedAt, beforeContent, readPath } = cr
       if (!tool || !res) {
         iterState.stepHadFailure = iterState.stepHadFailure || error
+        if (error && cr.escalatable !== false) iterState.escalatableFailure = true
         continue
       }
 
@@ -804,7 +1077,10 @@ export class AgentLoop {
         message: res.kind === "err" ? res.message : undefined,
         finishedAt,
       })
-      if (res.kind === "err") iterState.stepHadFailure = true
+      if (res.kind === "err") {
+        iterState.stepHadFailure = true
+        if (cr.escalatable !== false) iterState.escalatableFailure = true
+      }
 
       this.deps.bus?.emit({
         kind: res.kind === "err" ? "tool.error" : "tool.result",
@@ -860,6 +1136,13 @@ export class AgentLoop {
         id: `msg-${call.id}-${iteration}`,
         role: "tool",
         content: toolMessageContent(res),
+        parts: [
+          {
+            type: "tool_result",
+            toolCallId: call.id,
+            output: res.kind === "ok" ? res.output : { error: res.message },
+          },
+        ],
         toolCallId: call.id,
         timestamp: finishedAt ?? new Date().toISOString(),
       })
@@ -895,20 +1178,104 @@ export class AgentLoop {
 
 // ── Free functions ───────────────────────────────────────────────────────────
 
+interface StreamWatchdog {
+  timeoutMs?: number
+  idleTimeoutMs?: number
+}
+
+const DEFAULT_STREAM_TIMEOUT_MS = 10 * 60 * 1000 // 10 minutes overall
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 90 * 1000 // 90s without any event
+
+/**
+ * Iterate an LLM stream with an overall + idle watchdog.
+ * Yields every event; throws a descriptive error when a deadline is exceeded.
+ *
+ * Each `next()` is raced against a fresh idle timer (re-armed per chunk) and an
+ * overall timer (remaining budget). Whichever fires first resolves the race with
+ * `done`, breaking the loop, and the deadline reason is thrown afterwards. The
+ * abandoned `next()` promise is left for the source stream to settle — the
+ * watchdog's job is to stop *this* consumer from hanging forever.
+ */
+async function* withStreamWatchdog(
+  stream: LLMStream,
+  watchdog: StreamWatchdog,
+): AsyncGenerator<LLMStreamEvent> {
+  const overallMs = watchdog.timeoutMs ?? DEFAULT_STREAM_TIMEOUT_MS
+  const idleMs = watchdog.idleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS
+  const iterator = stream[Symbol.asyncIterator]()
+  const started = Date.now()
+  let deadlineHit: "overall" | "idle" | null = null
+
+  try {
+    while (true) {
+      const remaining = overallMs - (Date.now() - started)
+      if (remaining <= 0) {
+        deadlineHit = "overall"
+        break
+      }
+
+      let idleTimer: ReturnType<typeof setTimeout> | undefined
+      let overallTimer: ReturnType<typeof setTimeout> | undefined
+      const result = await Promise.race([
+        iterator.next(),
+        new Promise<IteratorResult<LLMStreamEvent>>((resolve) => {
+          idleTimer = setTimeout(() => {
+            deadlineHit = "idle"
+            resolve({ done: true, value: undefined })
+          }, idleMs)
+          overallTimer = setTimeout(() => {
+            deadlineHit = "overall"
+            resolve({ done: true, value: undefined })
+          }, remaining)
+        }),
+      ])
+      if (idleTimer) clearTimeout(idleTimer)
+      if (overallTimer) clearTimeout(overallTimer)
+
+      if (deadlineHit) break
+      if (result.done) break
+      yield result.value
+    }
+  } finally {
+    // On a deadline, tear down the source iterator so the underlying
+    // connection (fetch body reader / SDK stream) is actually closed — not
+    // just abandoned. Prevents timed-out streams from leaking connections.
+    if (deadlineHit) {
+      try {
+        await iterator.return?.()
+      } catch {
+        /* best-effort teardown */
+      }
+    }
+  }
+
+  const elapsed = Date.now() - started
+  if (deadlineHit === "overall") {
+    throw new Error(
+      `LLM stream timed out after ${Math.round(elapsed / 1000)}s (overall limit ${Math.round(overallMs / 1000)}s)`,
+    )
+  }
+  if (deadlineHit === "idle") {
+    throw new Error(`LLM stream idle timeout: no events for ${Math.round(idleMs / 1000)}s`)
+  }
+}
+
 async function completeWithStream(
   llm: LLMClient,
   req: { model: string; system: string; messages: LLMMessage[]; tools?: LLMToolSpec[] },
   onEvent: (event: LLMStreamEvent) => void,
+  watchdog?: StreamWatchdog,
 ): Promise<LLMResponse> {
   const guard = llm.completeStream
   if (!guard) throw new Error("LLM does not support streaming")
   const stream = await guard(req)
   let text = ""
+  let reasoning = ""
   const toolCalls = new Map<string, { id: string; name: string; input: unknown }>()
   let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0, usageAvailable: false }
   let streamError: string | null = null
 
-  for await (const event of stream) {
+  for await (const event of withStreamWatchdog(stream, watchdog ?? {})) {
     onEvent(event)
     switch (event.kind) {
       case "text_delta":
@@ -916,6 +1283,8 @@ async function completeWithStream(
         break
       case "reasoning_start":
       case "reasoning_delta":
+        reasoning += event.kind === "reasoning_delta" ? event.text : ""
+        break
       case "reasoning_end":
         break
       case "tool_call_delta": {
@@ -945,9 +1314,10 @@ async function completeWithStream(
         input: asRecord(tc.input),
       })),
       usage,
+      ...(reasoning ? { reasoning } : {}),
     }
   }
-  return { kind: "text", text, usage }
+  return { kind: "text", text, usage, ...(reasoning ? { reasoning } : {}) }
 }
 
 function toolMessageContent(
@@ -974,7 +1344,14 @@ function asRecord(input: unknown): Record<string, unknown> {
   return input as Record<string, unknown>
 }
 
-function appendAssistantText(session: SessionState, text: string): SessionState {
+function appendAssistantText(
+  session: SessionState,
+  text: string,
+  reasoning?: string,
+): SessionState {
+  const parts: MessagePart[] = []
+  if (reasoning) parts.push({ type: "reasoning", text: reasoning })
+  parts.push({ type: "text", text })
   return {
     ...session,
     messages: [
@@ -983,6 +1360,7 @@ function appendAssistantText(session: SessionState, text: string): SessionState 
         id: `msg-assistant-${Date.now()}`,
         role: "assistant",
         content: text,
+        parts,
         timestamp: new Date().toISOString(),
       },
     ],

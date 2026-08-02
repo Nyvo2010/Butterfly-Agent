@@ -1,11 +1,21 @@
 export { AnthropicClient, type AnthropicClientOptions } from "./anthropic-adapter"
 // Re-export from client.ts (shared module to avoid circular deps with provider.ts)
 export {
+  bareModelId,
   createClient,
   PROVIDER_ENV_VARS,
   PROVIDER_PROFILES,
   type ProviderConfig,
 } from "./client"
+// Failure classification for retry + escalation policy
+export {
+  type ClassifiedFailure,
+  classifyFailure,
+  type FailureCategory,
+  failureMessage,
+  isRetryable,
+  sleep,
+} from "./failure"
 export { GeminiClient, type GeminiClientOptions } from "./gemini-adapter"
 // models.dev catalog integration (OpenCode-compatible)
 export {
@@ -37,6 +47,8 @@ export type {
   LLMStreamEvent,
   LLMToolSpec,
   LLMUsage,
+  ModelRequestOverrideMap,
+  ModelRequestOverrides,
   ToolCallParser,
 } from "./types"
 export { VercelAILLMClient, type VercelAILLMClientOptions } from "./vercel-adapter"

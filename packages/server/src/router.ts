@@ -22,6 +22,10 @@ export interface RouteContext {
   query: Record<string, string>
   /** Parsed JSON body (for POST/PATCH/PUT). */
   body: Record<string, unknown>
+  /** Per-request CORS headers (from HttpRuntimeConfig). */
+  corsHeaders: Record<string, string>
+  /** Assigned request id (X-Request-Id). */
+  requestId: string
 }
 
 export type RouteHandler = (ctx: RouteContext) => Promise<void> | void
@@ -106,39 +110,78 @@ export class Router {
   size(): number {
     return this.routes.length
   }
+
+  /** Describe all registered routes (method + pattern) for OpenAPI export. */
+  describe(): Array<{ method: HttpMethod; pattern: string }> {
+    return this.routes.map((r) => ({ method: r.method, pattern: r.pattern }))
+  }
 }
 
 // ─── Response helpers ─────────────────────────────────────────────────────────
 
-const CORS_HEADERS: Record<string, string> = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, PUT, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+function responseHeaders(corsHeaders: Record<string, string>): Record<string, string> {
+  return { ...corsHeaders }
 }
 
-export function json(res: ServerResponse, status: number, data: unknown): void {
-  res.writeHead(status, { "Content-Type": "application/json", ...CORS_HEADERS })
+export function json(
+  res: ServerResponse,
+  status: number,
+  data: unknown,
+  corsHeaders: Record<string, string> = CORS_HEADERS,
+): void {
+  res.writeHead(status, { "Content-Type": "application/json", ...responseHeaders(corsHeaders) })
   res.end(JSON.stringify(data))
 }
 
-export function ok(res: ServerResponse, data: unknown): void {
-  json(res, 200, data)
+export function accepted(
+  res: ServerResponse,
+  data: unknown,
+  corsHeaders?: Record<string, string>,
+): void {
+  json(res, 202, data, corsHeaders)
 }
 
-export function created(res: ServerResponse, data: unknown): void {
-  json(res, 201, data)
+export function ok(res: ServerResponse, data: unknown, corsHeaders?: Record<string, string>): void {
+  json(res, 200, data, corsHeaders)
 }
 
-export function notFound(res: ServerResponse, message: string): void {
-  json(res, 404, { error: message })
+export function created(
+  res: ServerResponse,
+  data: unknown,
+  corsHeaders?: Record<string, string>,
+): void {
+  json(res, 201, data, corsHeaders)
 }
 
-export function badRequest(res: ServerResponse, message: string): void {
-  json(res, 400, { error: message })
+export function notFound(
+  res: ServerResponse,
+  message: string,
+  corsHeaders?: Record<string, string>,
+): void {
+  json(res, 404, { error: message }, corsHeaders)
 }
 
-export function serverError(res: ServerResponse, message: string): void {
-  json(res, 500, { error: message })
+export function badRequest(
+  res: ServerResponse,
+  message: string,
+  corsHeaders?: Record<string, string>,
+): void {
+  json(res, 400, { error: message }, corsHeaders)
+}
+
+export function serverError(
+  res: ServerResponse,
+  message: string,
+  corsHeaders?: Record<string, string>,
+): void {
+  json(res, 500, { error: message }, corsHeaders)
+}
+
+/** @deprecated Use buildCorsHeaders from http/config — kept for backward compat in tests. */
+const CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, PUT, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, X-Request-Id",
 }
 
 export { CORS_HEADERS }

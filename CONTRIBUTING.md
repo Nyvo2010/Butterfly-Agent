@@ -10,7 +10,7 @@ This project and everyone participating in it is governed by our [Code of Conduc
 
 ### Prerequisites
 
-- **Node.js** ≥ 18 (we recommend using [nvm](https://github.com/nvm-sh/nvm) — see `.nvmrc`)
+- **Node.js** ≥ 20.11 (we recommend using [nvm](https://github.com/nvm-sh/nvm) — see `.nvmrc`)
 - **pnpm** ≥ 10 (`npm install -g pnpm`)
 - **LLM API key** for integration testing (any OpenAI-compatible API key)
 

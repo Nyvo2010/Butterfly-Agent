@@ -1,5 +1,6 @@
 import { createOpenAI } from "@ai-sdk/openai"
 import { generateText, jsonSchema, streamText } from "ai"
+import { bareModelId } from "./client"
 import type {
   LLMClient,
   LLMContentPart,
@@ -8,6 +9,7 @@ import type {
   LLMStream,
   LLMToolSpec,
   LLMUsage,
+  ModelRequestOverrideMap,
 } from "./types"
 
 export interface VercelAILLMClientOptions {
@@ -15,6 +17,10 @@ export interface VercelAILLMClientOptions {
   baseUrl?: string
   /** Max retries for transient failures (429, 5xx). Default 2. */
   maxRetries?: number
+  /** Provider-level options merged into the request body. */
+  options?: Record<string, unknown>
+  /** Per-model request overrides (headers/body) keyed by bare model id. */
+  modelOverrides?: ModelRequestOverrideMap
 }
 
 const DEFAULT_MAX_RETRIES = 2
@@ -36,6 +42,8 @@ function backoffDelay(attempt: number): number {
 export class VercelAILLMClient implements LLMClient {
   private readonly openai
   private readonly maxRetries: number
+  private readonly options: Record<string, unknown>
+  private readonly modelOverrides: ModelRequestOverrideMap
 
   constructor(opts: VercelAILLMClientOptions) {
     if (!opts.apiKey || typeof opts.apiKey !== "string") {
@@ -46,6 +54,30 @@ export class VercelAILLMClient implements LLMClient {
       baseURL: opts.baseUrl,
     })
     this.maxRetries = opts.maxRetries ?? DEFAULT_MAX_RETRIES
+    this.options = opts.options ?? {}
+    this.modelOverrides = opts.modelOverrides ?? {}
+  }
+
+  /** Compute the merged extra body (provider options + per-model + request extras). */
+  private mergedBody(req: LLMRequest, model: string): Record<string, unknown> | undefined {
+    const override = this.modelOverrides[model]
+    const merged = {
+      ...this.options,
+      ...(req.options ?? {}),
+      ...(req.requestBody ?? {}),
+      ...(override?.body ?? {}),
+    }
+    return Object.keys(merged).length > 0 ? merged : undefined
+  }
+
+  /** Compute the merged extra headers. */
+  private mergedHeaders(req: LLMRequest, model: string): Record<string, string> | undefined {
+    const override = this.modelOverrides[model]
+    const merged = {
+      ...(override?.headers ?? {}),
+      ...(req.requestHeaders ?? {}),
+    }
+    return Object.keys(merged).length > 0 ? merged : undefined
   }
 
   async complete(req: LLMRequest): Promise<LLMResponse> {
@@ -78,16 +110,23 @@ export class VercelAILLMClient implements LLMClient {
   }
 
   private async _complete(req: LLMRequest): Promise<LLMResponse> {
-    const model = this.openai(req.model)
+    // Strip any provider prefix — the OpenAI-compatible endpoint expects a bare
+    // model id, and per-request model switching must work with cached clients.
+    const model = this.openai(bareModelId(req.model))
     const tools = req.tools && req.tools.length > 0 ? this.toVercelTools(req.tools) : undefined
     const messages = this.convertMessages(req.messages)
 
+    const body = this.mergedBody(req, bareModelId(req.model))
+    const headers = this.mergedHeaders(req, bareModelId(req.model))
     const result = await generateText({
       model,
       system: req.system,
       messages: messages as Parameters<typeof generateText>[0]["messages"],
       tools,
       toolChoice: tools ? "auto" : undefined,
+      ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
+      ...(body ? { body } : {}),
+      ...(headers ? { headers } : {}),
     })
 
     const hasUsage = !!result.usage
@@ -120,17 +159,22 @@ export class VercelAILLMClient implements LLMClient {
       const yieldedToolCallIds = new Set<string>()
       let yieldedChunks = false
       while (attempt <= retriesRemaining) {
-        const model = adapter.openai(req.model)
+        const model = adapter.openai(bareModelId(req.model))
         const tools =
           req.tools && req.tools.length > 0 ? adapter.toVercelTools(req.tools) : undefined
         const messages = adapter.convertMessages(req.messages)
         try {
+          const body = adapter.mergedBody(req, bareModelId(req.model))
+          const headers = adapter.mergedHeaders(req, bareModelId(req.model))
           const result = streamText({
             model,
             system: req.system,
             messages: messages as Parameters<typeof streamText>[0]["messages"],
             tools,
             toolChoice: tools ? "auto" : undefined,
+            ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
+            ...(body ? { body } : {}),
+            ...(headers ? { headers } : {}),
           })
           for await (const chunk of result.fullStream) {
             if (chunk.type === "text-delta") {

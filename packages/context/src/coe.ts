@@ -159,36 +159,56 @@ export class COE {
 
 /**
  * Given an index into messages, find the complete group it belongs to.
- * A group is: an assistant message with a toolCallId + all subsequent
- * tool-role messages with matching toolCallIds. This ensures we never
- * drop half a tool-call interaction, which would cause LLM API validation
- * errors from orphaned tool results or missing tool calls.
+ * A group is: an assistant tool-call message + all subsequent tool-role
+ * messages belonging to it. This ensures we never drop half a tool-call
+ * interaction, which would cause LLM API validation errors from orphaned
+ * tool results or missing tool calls.
  *
- * Decoupled from the agent loop's message format — uses toolCallId
- * correlation instead of string pattern matching on content.
+ * Group markers are detected structurally (in priority order):
+ *   1. `parts` containing a `tool_call` entry (OpenCode-style message parts)
+ *   2. assistant message with a `toolCallId` (Butterfly's loop sets this)
+ *   3. legacy "Using tools:" string prefix (backward compat)
  */
 function findMessageGroup(
-  messages: Array<{ role: string; content: string; toolCallId?: string }>,
+  messages: Array<{
+    role: string
+    content: string
+    toolCallId?: string
+    parts?: Array<{ type: string }>
+  }>,
   idx: number,
 ): { start: number; count: number } {
   const msg = messages[idx]
   if (!msg) return { start: idx, count: 0 }
 
+  const isAssistantGroupMarker = (m: {
+    role: string
+    content: string
+    toolCallId?: string
+    parts?: Array<{ type: string }>
+  }): boolean => {
+    if (m.role !== "assistant") return false
+    // Structural detection — parts with tool_call entries are authoritative.
+    if (m.parts?.some((p) => p.type === "tool_call")) return true
+    if (m.toolCallId) return true
+    return m.content.startsWith("Using tools:")
+  }
+
   if (msg.role === "tool") {
     // This is a tool result. Walk backward to find its parent assistant
-    // message by matching toolCallId, or by the "Using tools:" prefix as fallback.
+    // group marker by toolCallId or structure.
     let start = idx
     while (start > 0) {
       const prev = messages[start - 1]
-      if (
-        prev.role === "assistant" &&
-        (prev.toolCallId === msg.toolCallId || prev.content.startsWith("Using tools:"))
-      ) {
+      if (prev.role === "tool") {
+        start--
+        continue
+      }
+      if (isAssistantGroupMarker(prev)) {
         start = start - 1
         break
       }
-      if (prev.role !== "tool") break
-      start--
+      break
     }
     // Count forward: include this tool + any following tool messages.
     let count = idx - start + 1
@@ -199,21 +219,7 @@ function findMessageGroup(
     return { start, count }
   }
 
-  if (msg.role === "assistant" && msg.toolCallId) {
-    // This is an assistant marker with toolCallId. Include all following
-    // tool messages positionally (they belong to this tool-call group).
-    // The toolCallId on the assistant message identifies it as a group
-    // marker, replacing the legacy "Using tools:" string check.
-    let count = 1
-    for (let i = idx + 1; i < messages.length; i++) {
-      if (messages[i].role === "tool") count++
-      else break
-    }
-    return { start: idx, count }
-  }
-
-  // Fallback: legacy "Using tools:" pattern for backward compatibility.
-  if (msg.role === "assistant" && msg.content.startsWith("Using tools:")) {
+  if (isAssistantGroupMarker(msg)) {
     let count = 1
     for (let i = idx + 1; i < messages.length; i++) {
       if (messages[i].role === "tool") count++

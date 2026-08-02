@@ -20,12 +20,12 @@ import { promisify } from "node:util"
 
 const execFileAsync = promisify(execFile)
 
-interface SnapshotPatch {
+export interface SnapshotPatch {
   hash: string
   files: string[]
 }
 
-interface SnapshotService {
+export interface SnapshotService {
   /** Initialize the git snapshot repository. Call once per project. */
   init(worktree: string): Promise<void>
   /** Snapshot the working tree. Returns the git tree hash. */

@@ -17,7 +17,7 @@
 import type { Agent, AgentSideConnection } from "@agentclientprotocol/sdk"
 import type { AgentFactoryResult } from "@butterfly/agent"
 import { log } from "@butterfly/core"
-import { ServerApp } from "@butterfly/server"
+import { ServerApp, validateApiKey } from "@butterfly/server"
 import type { SessionState } from "@butterfly/session"
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -213,12 +213,22 @@ export function createButterflyACP(
         // Create a streaming agent loop that reports via sessionUpdate
         const streamEnabled = process.env.ACP_STREAM !== "false"
 
+        // Model-aware context budget: explicit config wins, otherwise derive
+        // from the session model's catalog context window (fallback 8000).
+        const selectedModel =
+          acpSession.session.selectedModel && acpSession.session.selectedModel !== "auto"
+            ? acpSession.session.selectedModel
+            : (app.butterflyConfig.model ?? "")
+        const maxContextTokens =
+          coeOpts?.maxContextTokens ??
+          (selectedModel ? await app.providerService.contextBudgetFor(selectedModel, 8000) : 8000)
+
         const result = await agent.loop.run({
           session: acpSession.session,
           query,
           cwd: acpSession.cwd,
           maxSteps: app.butterflyConfig.butterfly?.maxSteps ?? 20,
-          maxContextTokens: coeOpts?.maxContextTokens ?? 8000,
+          maxContextTokens,
           toolMessageMaxTokens: coeOpts?.toolMessageMaxTokens,
           sceOptions: sceOpts
             ? {
@@ -279,8 +289,28 @@ export function createButterflyACP(
     },
 
     // ── authenticate (optional) ───────────────────────────────────────
-    async authenticate(_params) {
-      // No authentication required — accept all
+    async authenticate(params) {
+      // When auth is enabled on the server, validate the client's auth params.
+      if (app.authConfig.enabled && app.authConfig.apiKey) {
+        // The ACP client may send auth params in various shapes.
+        // Check for common patterns: apiKey, token, or bearerToken fields.
+        const authParams = params as unknown as Record<string, unknown>
+        const clientToken =
+          (authParams.apiKey as string) ??
+          (authParams.token as string) ??
+          (authParams.bearerToken as string) ??
+          ""
+
+        if (!clientToken) {
+          log("warn", "acp.auth_missing", { reason: "No auth token provided" })
+          throw new Error("Authentication required. Provide apiKey, token, or bearerToken.")
+        }
+
+        if (!validateApiKey(clientToken, app.authConfig)) {
+          log("warn", "acp.auth_invalid")
+          throw new Error("Invalid API key.")
+        }
+      }
       log("info", "acp.authenticate")
       return {}
     },

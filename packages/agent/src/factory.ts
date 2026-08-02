@@ -47,6 +47,9 @@ import {
   webFetchTool,
   writeTool,
 } from "@butterfly/tools"
+import type { AskUserCallback } from "./ask-user"
+import { createSummarizingCompressor } from "./compactor"
+import { NoOpLSPClient } from "./integrations/noop-lsp"
 import { startBackgroundJobs } from "./jobs"
 import { type AgentEventSink, AgentLoop } from "./loop"
 import { buildPermissionHook } from "./permission"
@@ -54,28 +57,6 @@ import { QualityMonitor } from "./quality-monitor"
 import { ModelRouter } from "./router"
 import { getSnapshotService } from "./snapshot"
 import { Subagent } from "./subagent"
-
-/**
- * No-op LSP client — returns "not available" for all operations.
- * Used as default until a real LSP client is wired by the CLI/server.
- */
-class NoOpLSPClient implements LSPClientLike {
-  async goToDefinition() {
-    return []
-  }
-  async findReferences() {
-    return []
-  }
-  async hover() {
-    return null
-  }
-  async getDocumentSymbols() {
-    return []
-  }
-  async getDiagnostics() {
-    return []
-  }
-}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -110,7 +91,7 @@ export interface AgentFactoryOptions {
   /** Callback after each iteration. */
   onIteration?: (session: SessionState, iteration: number) => void
   /** Human-in-the-loop callback for ask_user tool. */
-  onAskUser?: (question: string, options?: string[]) => Promise<string | null>
+  onAskUser?: AskUserCallback
   /**
    * Optional event sink for decoupled event publishing (server event bus).
    * When set, the loop emits tool/file/stream events through it so external
@@ -241,11 +222,25 @@ export async function createAgent(opts: AgentFactoryOptions): Promise<AgentFacto
 
   // Agent loop
   const sce = new SCE(opts.tokenizer)
+
+  // In-loop summarization compressor (SmallCode/Atomic-style). When the context
+  // budget is exceeded, COE asks the LLM to summarize the oldest messages into a
+  // compact user message instead of only dropping them. Soft-fails to drop if
+  // no LLM is available or the summary call fails.
+  const compressor = createSummarizingCompressor({
+    getLLM: () =>
+      opts.providerService
+        ? opts.providerService.getClient(router.resolve("standard", 0).model)
+        : opts.llm,
+    getModel: () => router.resolve("standard", 0).model,
+  })
+
   const loop = new AgentLoop({
     llm: opts.llm,
     providerService: opts.providerService,
     sce,
     coe: new COE(opts.tokenizer),
+    compressor,
     router,
     registry,
     store: opts.store,
@@ -333,7 +328,7 @@ export async function createAgent(opts: AgentFactoryOptions): Promise<AgentFacto
     }
   }
 
-  // Background jobs: session cleanup, MCP heartbeats, stale lock cleanup.
+  // Background jobs: session cleanup and stale lock cleanup.
   const backgroundJobs = startBackgroundJobs({
     cwd: opts.cwd,
     store: opts.store,

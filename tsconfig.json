@@ -4,6 +4,6 @@
     "noEmit": true,
     "composite": false
   },
-  "include": ["packages/*/src", "apps/server/src", "core/src", "tests"],
+  "include": ["packages/*/src", "apps/*/src", "core/src", "tests"],
   "exclude": ["node_modules", "dist", "build"]
 }

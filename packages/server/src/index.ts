@@ -14,9 +14,13 @@
  * all agent logic, session state, and event broadcasting.
  */
 
+export type { RunSessionPromptOptions, RunSessionPromptResult } from "./agent-run"
+export { runSessionPrompt } from "./agent-run"
 export type { CreateAgentOptions, ServerAppOptions } from "./app"
-// ─── Core ──────────────────────────────────────────────────────────────────────
 export { ServerApp } from "./app"
+// ─── Auth ──────────────────────────────────────────────────────────────────────
+export type { AuthConfig } from "./auth"
+export { checkRequestAuth, isPublicPath, loadAuthConfig, validateApiKey } from "./auth"
 export type {
   ButterflyEvent,
   ButterflyEventKind,
@@ -30,12 +34,23 @@ export type {
 } from "./bus"
 // ─── Event Bus ─────────────────────────────────────────────────────────────────
 export { _resetEventIdCounter, EVENT_CATEGORIES, EventBus } from "./bus"
+// ─── Cursor pagination ────────────────────────────────────────────────────────
+export {
+  type CursorValue,
+  DEFAULT_PAGE_SIZE,
+  decodeCursor,
+  encodeCursor,
+  isAfterCursor,
+  isAfterCursorDesc,
+  parseLimit,
+} from "./cursor"
 export type { HttpServerHandle, HttpServerOptions } from "./http"
 // ─── HTTP Server ───────────────────────────────────────────────────────────────
 export { createHttpServer, startHttpServer } from "./http"
 export type { HttpMethod, RouteContext, RouteHandler } from "./router"
 // ─── Router ────────────────────────────────────────────────────────────────────
 export {
+  accepted,
   badRequest,
   CORS_HEADERS,
   created,
@@ -45,6 +60,8 @@ export {
   Router,
   serverError,
 } from "./router"
+// ─── OpenAPI ───────────────────────────────────────────────────────────────────
+export { buildOpenApi, registerOpenApiRoutes } from "./routes/openapi"
 // ─── Permission helpers ────────────────────────────────────────────────────────
 export { hasPendingPermissions, requestPermission } from "./routes/permission"
 export type { RunStatus } from "./run-state"

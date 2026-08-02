@@ -7,6 +7,16 @@ import { dirname, relative, resolve } from "node:path"
 
 export type ToolKind = "read" | "write" | "exec" | "delegate"
 
+/** Permission category for HITL prompts — mirrors @butterfly/agent PermissionCategory. */
+export type PermissionCategory = "ask_user" | "edit" | "bash" | "plan"
+
+/** Human-in-the-loop callback — shape matches @butterfly/agent AskUserCallback. */
+export type AskUserCallback = (
+  question: string,
+  options?: string[],
+  context?: { tool: string; category: PermissionCategory },
+) => Promise<string | null>
+
 /** Context passed to every tool invocation. */
 export interface ToolContext {
   /** Working directory; relative paths in `input` resolve against this. */
@@ -33,7 +43,7 @@ export interface ToolContext {
    * Returns the user's answer as a string, or null if cancelled.
    * OpenCode-compatible: mirrors OpenCode's question tool pattern.
    */
-  onAskUser?: (question: string, options?: string[]) => Promise<string | null>
+  onAskUser?: AskUserCallback
 }
 
 /**

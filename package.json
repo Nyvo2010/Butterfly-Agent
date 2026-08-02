@@ -14,12 +14,18 @@
     "format": "biome format --write .",
     "clean": "rm -rf dist build .turbo"
   },
-  "keywords": ["ai-agent", "coding-agent", "llm", "agent-framework"],
+  "keywords": [
+    "ai-agent",
+    "coding-agent",
+    "llm",
+    "agent-framework"
+  ],
   "author": "Butterfly Agent Contributors",
   "license": "MIT",
   "packageManager": "pnpm@10.33.2",
   "devDependencies": {
     "@biomejs/biome": "^2.5.2",
+    "@types/node": "^22.20.1",
     "typescript": "~5.7.3",
     "vitest": "^4.1.9"
   }

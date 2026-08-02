@@ -256,7 +256,7 @@ export const bashTool: Tool<{ stdout: string; stderr: string; exitCode: number }
     const workdir = resolve(rawWorkdir)
     if (ctx.workspaceRoots?.length) {
       const allowed = ctx.workspaceRoots.some(
-        (root) => workdir === resolve(root) || workdir.startsWith(resolve(root) + "/"),
+        (root) => workdir === resolve(root) || workdir.startsWith(`${resolve(root)}/`),
       )
       if (!allowed) {
         return {

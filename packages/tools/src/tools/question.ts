@@ -48,7 +48,10 @@ export const questionTool: Tool<{ answer: string }> = {
       : undefined
 
     try {
-      const answer = await ctx.onAskUser(question, options)
+      const answer = await ctx.onAskUser(question, options, {
+        tool: "ask_user",
+        category: "ask_user",
+      })
       if (answer === null) {
         return { kind: "err", message: "User cancelled the question." }
       }

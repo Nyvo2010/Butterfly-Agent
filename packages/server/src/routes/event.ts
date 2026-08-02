@@ -1,98 +1,130 @@
 /**
- * Event route group — global SSE event stream.
- *
- * This is the cornerstone of the client/server split: the client opens a single
- * SSE connection to /api/event and receives ALL Butterfly events (session, run,
- * tool, stream, file, permission, mcp). No polling, no per-endpoint subscriptions.
- *
- * Inspired by OpenCode's GET /event route. The bus is the single source of truth;
- * this route just bridges in-memory events to the network.
+ * Event route group — global SSE event stream with Last-Event-ID replay.
  */
 
 import type { ServerResponse } from "node:http"
 import type { ServerApp } from "../app"
 import type { ButterflyEvent } from "../bus"
 import type { Router } from "../router"
-import { CORS_HEADERS } from "../router"
 
-export function registerEventRoutes(router: Router, app: ServerApp): void {
-  // ── Global event stream (SSE) ──────────────────────────────────────────
-  router.get("/api/event", (ctx) => {
-    const res = ctx.res as ServerResponse
+const KEEPALIVE_MS = 15_000
+const RETRY_MS = 3_000
 
-    res.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-      ...CORS_HEADERS,
-    })
+function writeSseEvent(res: ServerResponse, event: ButterflyEvent): boolean {
+  const lines: string[] = [`id: ${event.id}`, `data: ${JSON.stringify(event)}`]
+  return res.write(`${lines.join("\n")}\n\n`)
+}
 
-    // Send an initial connected event so the client knows the stream is live.
-    res.write(`data: ${JSON.stringify({ kind: "stream.connected", type: "stream", data: {} })}\n\n`)
+function writeComment(res: ServerResponse): boolean {
+  return res.write(`: keepalive\n\n`)
+}
 
-    // Subscribe to all bus events and forward them as SSE data lines.
-    const unsubscribe = app.bus.subscribe((event: ButterflyEvent) => {
-      try {
-        res.write(`data: ${JSON.stringify(event)}\n\n`)
-      } catch {
-        // Client disconnected — unsubscribe will handle cleanup.
+function sseHead(res: ServerResponse, corsHeaders: Record<string, string>): void {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+    ...corsHeaders,
+  })
+  res.write(`retry: ${RETRY_MS}\n\n`)
+}
+
+function parseLastEventId(req: import("node:http").IncomingMessage): string | undefined {
+  const raw = req.headers["last-event-id"]
+  const value = Array.isArray(raw) ? raw[0] : raw
+  return value?.trim() || undefined
+}
+
+function streamEvents(
+  res: ServerResponse,
+  req: import("node:http").IncomingMessage,
+  corsHeaders: Record<string, string>,
+  replay: (afterId: string | undefined) => ButterflyEvent[],
+  subscribe: (handler: (event: ButterflyEvent) => void) => () => void,
+  connectPayload: ButterflyEvent,
+): void {
+  sseHead(res, corsHeaders)
+
+  const lastEventId = parseLastEventId(req)
+  for (const event of replay(lastEventId)) {
+    if (!writeSseEvent(res, event)) {
+      res.destroy()
+      return
+    }
+  }
+
+  if (!writeSseEvent(res, connectPayload)) {
+    res.destroy()
+    return
+  }
+
+  const unsubscribe = subscribe((event) => {
+    try {
+      if (!writeSseEvent(res, event)) {
         unsubscribe()
-      }
-    })
-
-    // Keepalive every 15s to prevent proxy timeouts.
-    const keepAlive = setInterval(() => {
-      try {
-        res.write(": keepalive\n\n")
-      } catch {
         clearInterval(keepAlive)
-        unsubscribe()
+        res.destroy()
       }
-    }, 15_000)
-
-    // Clean up on client disconnect.
-    ctx.req.on("close", () => {
-      clearInterval(keepAlive)
+    } catch {
       unsubscribe()
-    })
+      clearInterval(keepAlive)
+    }
   })
 
-  // ── Session-specific event stream (SSE) ────────────────────────────────
-  router.get("/api/sessions/:id/stream", (ctx) => {
-    const res = ctx.res as ServerResponse
-    const sessionId = ctx.params.id
-
-    res.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-      ...CORS_HEADERS,
-    })
-
-    res.write(
-      `data: ${JSON.stringify({ kind: "stream.connected", type: "stream", sessionId, data: {} })}\n\n`,
-    )
-
-    const unsubscribe = app.bus.subscribeToSession(sessionId, (event: ButterflyEvent) => {
-      try {
-        res.write(`data: ${JSON.stringify(event)}\n\n`)
-      } catch {
-        unsubscribe()
-      }
-    })
-
-    const keepAlive = setInterval(() => {
-      try {
-        res.write(": keepalive\n\n")
-      } catch {
+  const keepAlive = setInterval(() => {
+    try {
+      if (!writeComment(res)) {
         clearInterval(keepAlive)
         unsubscribe()
+        res.destroy()
       }
-    }, 15_000)
-
-    ctx.req.on("close", () => {
+    } catch {
       clearInterval(keepAlive)
       unsubscribe()
-    })
+    }
+  }, KEEPALIVE_MS)
+
+  req.on("close", () => {
+    clearInterval(keepAlive)
+    unsubscribe()
+  })
+}
+
+export function registerEventRoutes(router: Router, app: ServerApp): void {
+  router.get("/api/event", (ctx) => {
+    streamEvents(
+      ctx.res as ServerResponse,
+      ctx.req,
+      ctx.corsHeaders,
+      (afterId) => app.bus.replay(afterId),
+      (handler) => app.bus.subscribe(handler),
+      {
+        kind: "stream.connected",
+        type: "stream",
+        id: "evt-bootstrap",
+        timestamp: new Date().toISOString(),
+        data: {},
+      } as ButterflyEvent,
+    )
+  })
+
+  router.get("/api/sessions/:id/stream", (ctx) => {
+    const sessionId = ctx.params.id
+    streamEvents(
+      ctx.res as ServerResponse,
+      ctx.req,
+      ctx.corsHeaders,
+      (afterId) => app.bus.replay(afterId, sessionId),
+      (handler) => app.bus.subscribeToSession(sessionId, handler),
+      {
+        kind: "stream.connected",
+        type: "stream",
+        sessionId,
+        id: "evt-bootstrap",
+        timestamp: new Date().toISOString(),
+        data: {},
+      } as ButterflyEvent,
+    )
   })
 }

@@ -234,7 +234,9 @@ export class FileSystemSessionStore implements SessionStore {
           const parsed: unknown = JSON.parse(raw)
           if (!validateSessionState(parsed)) continue
           results.push({ id, updatedAt: parsed.updatedAt })
-        } catch {}
+        } catch {
+          // Skip corrupt individually — one bad file shouldn't break the list.
+        }
       }
       return results.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     } catch (err) {

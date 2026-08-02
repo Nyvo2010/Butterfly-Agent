@@ -17,6 +17,7 @@
  */
 
 import { log } from "@butterfly/core"
+import type { SessionStore } from "@butterfly/session"
 import type { EventBus } from "./bus"
 
 export type RunStatus = "idle" | "running"
@@ -44,7 +45,10 @@ export class RunStateManager {
    * Returns the AbortController the caller should pass to the agent loop.
    * The `done` promise resolves when the run completes or is aborted.
    */
-  start(sessionId: string): { abort: AbortController; done: Promise<void> } {
+  start(
+    sessionId: string,
+    info?: { query?: string; model?: string; tier?: string },
+  ): { abort: AbortController; done: Promise<void> } {
     // Abort any existing run for this session.
     this.abort(sessionId)
 
@@ -64,7 +68,15 @@ export class RunStateManager {
     }
     this.runs.set(sessionId, entry)
 
-    this.bus.emit({ kind: "run.started", sessionId })
+    this.bus.emit({
+      kind: "run.started",
+      sessionId,
+      data: {
+        query: info?.query ?? "",
+        model: info?.model ?? "default",
+        tier: info?.tier ?? "standard",
+      },
+    })
     log("info", "run_state.start", { sessionId })
     return { abort, done }
   }
@@ -79,7 +91,7 @@ export class RunStateManager {
    */
   complete(
     sessionId: string,
-    info: { iterations: number; stopReason: string; model: string; tier: string },
+    info: { iterations: number; stopReason: string; model: string; tier: string; query?: string },
     expectedAbort?: AbortController,
   ): void {
     const entry = this.runs.get(sessionId)
@@ -148,6 +160,45 @@ export class RunStateManager {
   await(sessionId: string): Promise<void> {
     const entry = this.runs.get(sessionId)
     return entry ? entry.done : Promise.resolve()
+  }
+
+  /**
+   * Detect and clear persisted active-run markers after a restart.
+   *
+   * The in-memory `runs` map is empty on boot, so any session carrying an
+   * `activeRun` marker was left behind by a crashed/killed process. This sweep
+   * emits `run.recovered` for each and clears the marker so `/status` reports
+   * an honest "idle" (with recovery metadata in the event) instead of lying
+   * that the run is still active.
+   */
+  async recoverFromStore(store: SessionStore): Promise<number> {
+    let recovered = 0
+    try {
+      const entries = await store.list()
+      for (const entry of entries) {
+        // Skip sessions that are actually running in this process.
+        if (this.runs.has(entry.id)) continue
+        const session = await store.load(entry.id)
+        if (!session?.activeRun) continue
+
+        const { startedAt, query, model, tier } = session.activeRun
+        this.bus.emit({
+          kind: "run.recovered",
+          sessionId: session.id,
+          data: { startedAt, query, model, tier: tier ?? "standard" },
+        })
+        log("warn", "run_state.recovered_interrupted", {
+          sessionId: session.id,
+          startedAt,
+        })
+        // Clear the marker so subsequent status checks are honest.
+        await store.save({ ...session, activeRun: undefined })
+        recovered++
+      }
+    } catch (err) {
+      log("warn", "run_state.recover_failed", { error: (err as Error).message })
+    }
+    return recovered
   }
 
   /** Abort all active runs (used on shutdown). */

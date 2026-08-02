@@ -169,18 +169,75 @@ export async function connectMCPServer(
   }
 }
 
+export interface MCPServerStatus {
+  name: string
+  connected: boolean
+  toolCount: number
+  error?: string
+}
+
+/** List connection status for all known MCP servers (connected or configured-only). */
+export function listMCPServerStatus(
+  configuredNames: string[] = Array.from(connections.keys()),
+): MCPServerStatus[] {
+  const names = new Set([...configuredNames, ...connections.keys()])
+  return Array.from(names).map((name) => {
+    const conn = connections.get(name)
+    return {
+      name,
+      connected: Boolean(conn),
+      toolCount: conn?.tools.length ?? 0,
+    }
+  })
+}
+
+export function isMCPConnected(name: string): boolean {
+  return connections.has(name)
+}
+
+export function getMCPTools(): Tool[] {
+  const tools: Tool[] = []
+  for (const conn of connections.values()) {
+    tools.push(...conn.tools)
+  }
+  return tools
+}
+
+export async function disconnectMCPServer(name: string): Promise<boolean> {
+  const conn = connections.get(name)
+  if (!conn) return false
+  try {
+    const client = conn.client as { close: () => Promise<void> }
+    await client.close()
+  } catch {
+    // Best-effort disconnect
+  }
+  connections.delete(name)
+  return true
+}
+
 export async function connectAllMCPServers(
   mcpConfig: Record<string, ButterflyMCPConfig>,
   defaultKind?: Tool["kind"],
+  hooks?: {
+    onConnected?: (name: string, toolCount: number) => void
+    onError?: (name: string, message: string) => void
+  },
 ): Promise<Tool[]> {
   const allTools: Tool[] = []
   for (const [serverName, config] of Object.entries(mcpConfig)) {
-    if (connections.has(serverName)) continue
+    if (connections.has(serverName)) {
+      allTools.push(...(connections.get(serverName)?.tools ?? []))
+      continue
+    }
     try {
       const tools = await connectMCPServer(serverName, config, defaultKind)
       allTools.push(...tools)
+      hooks?.onConnected?.(serverName, tools.length)
     } catch (err) {
-      log("error", `MCP server "${serverName}" failed to connect: ${(err as Error).message}`)
+      const message = (err as Error).message
+      log("error", `MCP server "${serverName}" failed to connect: ${message}`)
+      hooks?.onError?.(serverName, message)
     }
   }
   return allTools

@@ -117,6 +117,17 @@ export interface SessionState {
    * todos survive restarts. Updated by the todowrite tool.
    */
   todos?: import("./todo").TodoItem[]
+  /**
+   * Active-run marker — persisted so a crashed/restarted server can detect
+   * interrupted runs and report an honest status instead of "running" forever.
+   * Set when a run starts, cleared when it completes/aborts/errors.
+   */
+  activeRun?: {
+    startedAt: string
+    query?: string
+    model?: string
+    tier?: string
+  }
 }
 
 /** Default (zeroed) session usage. */

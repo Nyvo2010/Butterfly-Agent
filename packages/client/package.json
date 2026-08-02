@@ -1,0 +1,18 @@
+{
+  "name": "@butterfly/client",
+  "version": "0.1.0",
+  "description": "Butterfly Agent — typed HTTP + SSE client SDK for building custom clients",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "test": "echo 'Use pnpm test from project root to run all tests'"
+  },
+  "dependencies": {
+    "@butterfly/session": "workspace:*"
+  }
+}

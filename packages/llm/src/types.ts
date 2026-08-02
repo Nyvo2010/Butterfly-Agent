@@ -56,14 +56,26 @@ export interface LLMRequest {
   tools?: LLMToolSpec[]
   /** Optional temperature override (provider-specific semantics). */
   temperature?: number
+  /**
+   * Provider-specific options forwarded into the request body
+   * (e.g. reasoning_effort for OpenAI, openrouter.reasoning for OpenRouter).
+   * Merged after adapter defaults but before per-model request overrides.
+   */
+  options?: Record<string, unknown>
+  /** Extra HTTP headers merged into the provider request. */
+  requestHeaders?: Record<string, string>
+  /** Extra body fields merged into the provider request. */
+  requestBody?: Record<string, unknown>
 }
 
 export type LLMResponse =
-  | { kind: "text"; text: string; usage: LLMUsage }
+  | { kind: "text"; text: string; usage: LLMUsage; reasoning?: string }
   | {
       kind: "tool_calls"
       calls: Array<{ id: string; name: string; input: unknown }>
       usage: LLMUsage
+      /** Optional accumulated reasoning/thinking text from the stream. */
+      reasoning?: string
     }
 
 export interface ToolCallParser {
@@ -94,3 +106,14 @@ export interface LLMClient {
   /** Optional streaming completion. Returns an async iterable of events. */
   completeStream?(req: LLMRequest): Promise<LLMStream>
 }
+
+/**
+ * Per-model request overrides (headers/body) resolved from ProviderConfig.
+ * Keyed by bare model id (e.g. "claude-sonnet-4-5").
+ */
+export interface ModelRequestOverrides {
+  headers?: Record<string, string>
+  body?: Record<string, unknown>
+}
+
+export type ModelRequestOverrideMap = Record<string, ModelRequestOverrides>

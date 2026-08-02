@@ -4,7 +4,15 @@
  * Implements the LLMClient interface for seamless integration with the agent loop.
  */
 
-import type { LLMClient, LLMRequest, LLMResponse, LLMStream, LLMUsage } from "./types"
+import { bareModelId } from "./client"
+import type {
+  LLMClient,
+  LLMRequest,
+  LLMResponse,
+  LLMStream,
+  LLMUsage,
+  ModelRequestOverrideMap,
+} from "./types"
 
 export interface AnthropicClientOptions {
   apiKey: string
@@ -12,21 +20,67 @@ export interface AnthropicClientOptions {
   model?: string
   /** Max retries for transient failures. Default 2. */
   maxRetries?: number
+  /**
+   * Provider-level options merged into the request body
+   * (e.g. { reasoning: { effort: "high" } } — mirrors OpenCode provider options).
+   */
+  options?: Record<string, unknown>
+  /** Per-model request overrides (headers/body) keyed by bare model id. */
+  modelOverrides?: ModelRequestOverrideMap
 }
 
 export class AnthropicClient implements LLMClient {
   private readonly apiKey: string
   private readonly model: string
   private readonly maxRetries: number
+  private readonly options: Record<string, unknown>
+  private readonly modelOverrides: ModelRequestOverrideMap
 
   constructor(opts: AnthropicClientOptions) {
     if (!opts.apiKey) throw new Error("AnthropicClient: apiKey is required")
     this.apiKey = opts.apiKey
     this.model = opts.model ?? "claude-sonnet-4-20250514"
     this.maxRetries = opts.maxRetries ?? 2
+    this.options = opts.options ?? {}
+    this.modelOverrides = opts.modelOverrides ?? {}
+  }
+
+  /** Merge provider options + per-model overrides + request extras for a model. */
+  private mergedBody(
+    req: LLMRequest,
+    model: string,
+    base: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const override = this.modelOverrides[model]
+    return {
+      ...base,
+      ...this.options,
+      ...(req.options ?? {}),
+      ...(req.requestBody ?? {}),
+      ...(override?.body ?? {}),
+    }
+  }
+
+  /** Merge per-model + request headers. */
+  private mergedHeaders(
+    req: LLMRequest,
+    model: string,
+    base: Record<string, string>,
+  ): Record<string, string> {
+    const override = this.modelOverrides[model]
+    return {
+      ...base,
+      ...(override?.headers ?? {}),
+      ...(req.requestHeaders ?? {}),
+    }
   }
 
   async complete(req: LLMRequest): Promise<LLMResponse> {
+    // Honor the per-request model so a cached client (ProviderService caches by
+    // provider prefix) doesn't pin the first model used. Strip any provider
+    // prefix — the API expects a bare model id.
+    const model = bareModelId(req.model || this.model)
+
     // Filter system messages from the array — Anthropic uses a top-level system param.
     // Combine any system messages from the session with the caller-provided system prompt.
     const systemMessages = req.messages.filter((m) => m.role === "system")
@@ -52,20 +106,23 @@ export class AnthropicClient implements LLMClient {
 
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       try {
+        const body = this.mergedBody(req, model, {
+          model,
+          system: systemPrompt || undefined,
+          messages,
+          tools: tools?.length ? tools : undefined,
+          max_tokens: 4096,
+          ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
+        })
+        const headers = this.mergedHeaders(req, model, {
+          "Content-Type": "application/json",
+          "x-api-key": this.apiKey,
+          "anthropic-version": "2023-06-01",
+        })
         const response = await fetch("https://api.anthropic.com/v1/messages", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-api-key": this.apiKey,
-            "anthropic-version": "2023-06-01",
-          },
-          body: JSON.stringify({
-            model: this.model,
-            system: systemPrompt || undefined,
-            messages,
-            tools: tools?.length ? tools : undefined,
-            max_tokens: 4096,
-          }),
+          headers,
+          body: JSON.stringify(body),
         })
 
         if (!response.ok) {
@@ -126,8 +183,9 @@ export class AnthropicClient implements LLMClient {
 
   async completeStream(req: LLMRequest): Promise<LLMStream> {
     // Capture values before the generator to avoid `this` binding issues.
+    // Honor per-request model (see complete() — cached clients must not pin).
     const apiKey = this.apiKey
-    const model = this.model
+    const model = bareModelId(req.model || this.model)
 
     // Filter system messages from the array — Anthropic uses a top-level system param.
     const systemMessages = req.messages.filter((m) => m.role === "system")
@@ -151,24 +209,38 @@ export class AnthropicClient implements LLMClient {
       input_schema: t.inputSchema as Record<string, unknown>,
     }))
 
+    // Capture provider options for the generator (mirrors complete()).
+    const options = this.options
+    const modelOverrides = this.modelOverrides
+
     // eslint-disable-next-line require-yield
     return (async function* () {
       try {
+        const override = modelOverrides[model]
+        const body = {
+          model: model,
+          system: systemPrompt || undefined,
+          messages,
+          tools: tools?.length ? tools : undefined,
+          max_tokens: 4096,
+          stream: true,
+          ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
+          ...options,
+          ...(req.options ?? {}),
+          ...(req.requestBody ?? {}),
+          ...(override?.body ?? {}),
+        }
+        const headers = {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          ...(override?.headers ?? {}),
+          ...(req.requestHeaders ?? {}),
+        }
         const response = await fetch("https://api.anthropic.com/v1/messages", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-api-key": apiKey,
-            "anthropic-version": "2023-06-01",
-          },
-          body: JSON.stringify({
-            model: model,
-            system: systemPrompt || undefined,
-            messages,
-            tools: tools?.length ? tools : undefined,
-            max_tokens: 4096,
-            stream: true,
-          }),
+          headers,
+          body: JSON.stringify(body),
         })
 
         if (!response.ok) {

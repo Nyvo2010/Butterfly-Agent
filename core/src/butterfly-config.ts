@@ -163,6 +163,8 @@ export interface ButterflyConfig {
   agent?: Record<string, ButterflyAgentConfig>
   /** Permission rules (Opencode-compatible). */
   permission?: ButterflyPermissionConfig
+  /** API key for server authentication. When set, all API requests require Authorization header. */
+  apiKey?: string
   /** Butterfly-specific extensions. */
   butterfly?: {
     /** Tiered model mapping for ModelRouter. */
@@ -186,6 +188,34 @@ export interface ButterflyConfig {
     }
     /** Default max steps before loop termination. */
     maxSteps?: number
+    /** Background job tuning. */
+    backgroundJobs?: {
+      /** Job run interval in ms (default 60s). */
+      intervalMs?: number
+      /**
+       * OPT-IN stale-session cleanup age in ms. Butterfly never deletes
+       * sessions unless this is explicitly set to a positive value.
+       * 0 / unset = never delete sessions (default).
+       */
+      staleSessionAgeMs?: number
+    }
+    /** LSP (Language Server Protocol) integration. Enabled by default. */
+    lsp?: {
+      /** Set false to disable LSP even when a language server is available. */
+      enabled?: boolean
+      /** Command + args to spawn the default language server. */
+      command?: string | string[]
+      /** Request timeout in milliseconds. */
+      timeoutMs?: number
+      /** Per-language servers routed by file extension. */
+      servers?: Record<
+        string,
+        {
+          command: string | string[]
+          extensions: string[]
+        }
+      >
+    }
   }
 }
 
@@ -207,7 +237,10 @@ export const DEFAULT_CONFIG: ButterflyConfig = {
       topFiles: 3,
     },
     coe: {
-      maxContextTokens: 8000,
+      // NOTE: no default maxContextTokens here — when unset, the server derives
+      // the budget from the selected model's catalog context window (fallback
+      // 8000). See ProviderService.contextBudgetFor. This prevents big-context
+      // models from being crushed into a fixed 8k budget.
       toolMessageMaxTokens: 2000,
     },
     maxSteps: 20,
@@ -408,6 +441,13 @@ function validateButterflyConfig(raw: Record<string, unknown>): ButterflyConfig 
     }
     if (Object.keys(agent).length > 0) config.agent = agent
   }
+  if (typeof raw.apiKey === "string") config.apiKey = raw.apiKey
+  else if (raw.apiKey !== undefined)
+    log("warn", "config.invalid_type", {
+      field: "apiKey",
+      expected: "string",
+      got: typeof raw.apiKey,
+    })
   if (
     typeof raw.permission === "object" &&
     raw.permission !== null &&

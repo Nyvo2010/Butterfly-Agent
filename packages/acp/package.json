@@ -12,6 +12,7 @@
     "test": "echo 'Use pnpm test from project root to run all tests'"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "^0.4.9",
     "@butterfly/agent": "workspace:*",
     "@butterfly/context": "workspace:*",
     "@butterfly/core": "workspace:*",
@@ -21,7 +22,6 @@
     "@butterfly/tools": "workspace:*"
   },
   "devDependencies": {
-    "@agentclientprotocol/sdk": "^0.4.9",
     "@types/node": "^22",
     "tsx": "^4",
     "typescript": "~5.7.3"

@@ -4,7 +4,14 @@
  * Implements the LLMClient interface for seamless integration with the agent loop.
  */
 
-import type { LLMClient, LLMRequest, LLMResponse, LLMStream } from "./types"
+import { bareModelId } from "./client"
+import type {
+  LLMClient,
+  LLMRequest,
+  LLMResponse,
+  LLMStream,
+  ModelRequestOverrideMap,
+} from "./types"
 
 export interface GeminiClientOptions {
   apiKey: string
@@ -12,22 +19,30 @@ export interface GeminiClientOptions {
   model?: string
   /** Max retries for transient failures. Default 2. */
   maxRetries?: number
+  /** Provider-level options merged into the request body. */
+  options?: Record<string, unknown>
+  /** Per-model request overrides (headers/body) keyed by bare model id. */
+  modelOverrides?: ModelRequestOverrideMap
 }
 
 export class GeminiClient implements LLMClient {
   private readonly apiKey: string
   private readonly model: string
   private readonly maxRetries: number
+  private readonly options: Record<string, unknown>
+  private readonly modelOverrides: ModelRequestOverrideMap
 
   constructor(opts: GeminiClientOptions) {
     if (!opts.apiKey) throw new Error("GeminiClient: apiKey is required")
     this.apiKey = opts.apiKey
     this.model = opts.model ?? "gemini-2.5-pro"
     this.maxRetries = opts.maxRetries ?? 2
+    this.options = opts.options ?? {}
+    this.modelOverrides = opts.modelOverrides ?? {}
   }
 
   async complete(req: LLMRequest): Promise<LLMResponse> {
-    const model = req.model || this.model
+    const model = bareModelId(req.model || this.model)
     const systemPrompt = req.system ?? ""
 
     // Gemini does not support a native "system" role in the contents array.
@@ -70,18 +85,29 @@ export class GeminiClient implements LLMClient {
 
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       try {
+        const override = this.modelOverrides[model]
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${this.apiKey}`
+        const body = {
+          contents: merged,
+          tools: tools?.length ? tools : undefined,
+          generationConfig:
+            req.temperature !== undefined
+              ? { temperature: req.temperature, maxOutputTokens: 4096 }
+              : { maxOutputTokens: 4096 },
+          ...this.options,
+          ...(req.options ?? {}),
+          ...(req.requestBody ?? {}),
+          ...(override?.body ?? {}),
+        }
+        const headers = {
+          "Content-Type": "application/json",
+          ...(override?.headers ?? {}),
+          ...(req.requestHeaders ?? {}),
+        }
         const response = await fetch(url, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: merged,
-            tools: tools?.length ? tools : undefined,
-            generationConfig:
-              req.temperature !== undefined
-                ? { temperature: req.temperature, maxOutputTokens: 4096 }
-                : { maxOutputTokens: 4096 },
-          }),
+          headers,
+          body: JSON.stringify(body),
         })
 
         if (!response.ok) {
@@ -168,7 +194,7 @@ export class GeminiClient implements LLMClient {
   async completeStream(req: LLMRequest): Promise<LLMStream> {
     // Capture values before the generator to avoid `this` binding issues.
     const apiKey = this.apiKey
-    const model = req.model || this.model
+    const model = bareModelId(req.model || this.model)
     const systemPrompt: string = req.system ?? ""
     // Gemini does not support a native "system" role in the contents array.
     // Embed system instructions as the first user message per Gemini docs.
@@ -205,21 +231,36 @@ export class GeminiClient implements LLMClient {
       ],
     }))
 
+    // Capture provider options for the generator.
+    const options = this.options
+    const modelOverrides = this.modelOverrides
+
     // eslint-disable-next-line require-yield
     return (async function* () {
       try {
+        const override = modelOverrides[model]
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`
+        const body = {
+          contents: merged,
+          tools: tools?.length ? tools : undefined,
+          generationConfig:
+            req.temperature !== undefined
+              ? { temperature: req.temperature, maxOutputTokens: 4096 }
+              : { maxOutputTokens: 4096 },
+          ...options,
+          ...(req.options ?? {}),
+          ...(req.requestBody ?? {}),
+          ...(override?.body ?? {}),
+        }
+        const headers = {
+          "Content-Type": "application/json",
+          ...(override?.headers ?? {}),
+          ...(req.requestHeaders ?? {}),
+        }
         const response = await fetch(url, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: merged,
-            tools: tools?.length ? tools : undefined,
-            generationConfig:
-              req.temperature !== undefined
-                ? { temperature: req.temperature, maxOutputTokens: 4096 }
-                : { maxOutputTokens: 4096 },
-          }),
+          headers,
+          body: JSON.stringify(body),
         })
 
         if (!response.ok) {

@@ -1,7 +1,12 @@
 /**
  * Background jobs system — mirrors OpenCode's background job infrastructure.
- * Runs periodic maintenance tasks: stale session cleanup, MCP heartbeat
- * checks, and orphaned lock cleanup.
+ * Runs periodic maintenance tasks: stale session cleanup and orphaned lock
+ * cleanup.
+ *
+ * IMPORTANT: stale-session auto-delete is OPT-IN. Butterfly never deletes
+ * sessions unless the operator explicitly sets `butterfly.backgroundJobs`
+ * `staleSessionAgeMs` in config. Silent data loss is worse than disk bloat,
+ * so the default is OFF (0 = disabled).
  *
  * Jobs run on a configurable interval (default 60s) and are automatically
  * stopped when the agent disposes.
@@ -25,10 +30,10 @@ export interface BackgroundJobsHandle {
 }
 
 /**
- * Session older than this (default 24h) without update is considered stale
- * and eligible for cleanup.
+ * Default stale-session cleanup age. 0 = disabled (opt-in).
+ * Operators enable cleanup by setting `butterfly.backgroundJobs.staleSessionAgeMs`.
  */
-const DEFAULT_STALE_SESSION_AGE_MS = 24 * 60 * 60 * 1000
+const DEFAULT_STALE_SESSION_AGE_MS = 0
 
 /** Default interval between job runs (60s). */
 const DEFAULT_INTERVAL_MS = 60_000
@@ -38,6 +43,10 @@ export function startBackgroundJobs(opts: BackgroundJobsOptions): BackgroundJobs
   const staleAgeMs =
     opts.config.butterfly?.backgroundJobs?.staleSessionAgeMs ?? DEFAULT_STALE_SESSION_AGE_MS
 
+  // Opt-in: cleanup only runs when staleSessionAgeMs is explicitly set to a
+  // positive value. 0/undefined/negative means "never delete sessions".
+  const cleanupEnabled = Number.isFinite(staleAgeMs) && staleAgeMs > 0
+
   let timer: ReturnType<typeof setInterval> | null = null
   let stopped = false
 
@@ -45,30 +54,32 @@ export function startBackgroundJobs(opts: BackgroundJobsOptions): BackgroundJobs
     if (stopped) return
 
     try {
-      // ── Stale session cleanup ──────────────────────────────────────
-      const now = Date.now()
-      const staleThreshold = now - staleAgeMs
+      // ── Stale session cleanup (opt-in) ─────────────────────────────
+      if (cleanupEnabled) {
+        const now = Date.now()
+        const staleThreshold = now - staleAgeMs
 
-      const sessionEntries = await opts.store.list()
-      if (sessionEntries && sessionEntries.length > 0) {
-        let cleaned = 0
-        for (const entry of sessionEntries) {
-          try {
-            const updatedAt = new Date(entry.updatedAt).getTime()
-            if (Number.isNaN(updatedAt)) continue
-            if (updatedAt < staleThreshold) {
-              await opts.store.delete(entry.id)
-              cleaned++
+        const sessionEntries = await opts.store.list()
+        if (sessionEntries && sessionEntries.length > 0) {
+          let cleaned = 0
+          for (const entry of sessionEntries) {
+            try {
+              const updatedAt = new Date(entry.updatedAt).getTime()
+              if (Number.isNaN(updatedAt)) continue
+              if (updatedAt < staleThreshold) {
+                await opts.store.delete(entry.id)
+                cleaned++
+              }
+            } catch (err) {
+              log(
+                "warn",
+                `[background] failed to clean session ${entry.id}: ${(err as Error).message}`,
+              )
             }
-          } catch (err) {
-            log(
-              "warn",
-              `[background] failed to clean session ${entry.id}: ${(err as Error).message}`,
-            )
           }
-        }
-        if (cleaned > 0) {
-          log("info", `[background] cleaned ${cleaned} stale sessions`)
+          if (cleaned > 0) {
+            log("info", `[background] cleaned ${cleaned} stale sessions`)
+          }
         }
       }
     } catch (err) {

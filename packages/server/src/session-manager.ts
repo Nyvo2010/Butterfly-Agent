@@ -18,9 +18,40 @@
 import { randomUUID } from "node:crypto"
 import { log } from "@butterfly/core"
 import type { LLMUsage } from "@butterfly/llm"
-import type { Mode, SessionState, SessionStore, SessionUsage, Tier } from "@butterfly/session"
+import type {
+  Mode,
+  SessionMessage,
+  SessionState,
+  SessionStore,
+  SessionUsage,
+  Tier,
+} from "@butterfly/session"
 import { createSession, zeroUsage } from "@butterfly/session"
 import type { EventBus } from "./bus"
+import { emitNewMessages } from "./message-events"
+
+/** Schema version for exported session JSON. Bump on breaking format changes. */
+export const SESSION_EXPORT_VERSION = 1
+
+export interface SessionExport {
+  /** Export schema version. */
+  schemaVersion: number
+  /** Export timestamp (ISO 8601). */
+  exportedAt: string
+  /** Original session id. */
+  sessionId: string
+  /** The full session state. */
+  session: SessionState
+}
+
+export interface SessionSearchResult {
+  id: string
+  title: string
+  summary?: string
+  updatedAt: string
+  /** Message snippets that matched the query. */
+  matches: Array<{ role: string; content: string }>
+}
 
 const MAX_TITLE_LENGTH = 80
 const MAX_SUMMARY_LENGTH = 200
@@ -203,14 +234,17 @@ export class SessionManager {
   /**
    * Persist an updated session (e.g. after the agent loop ran).
    * Auto-derives a title if none is set.
+   * Emits message.added for any new messages when `previousMessageCount` is set.
    */
-  async save(session: SessionState): Promise<void> {
+  async save(session: SessionState, opts?: { previousMessageCount?: number }): Promise<void> {
+    const prevCount = opts?.previousMessageCount ?? session.messages.length
     const toSave: SessionState = {
       ...session,
       title: session.title ?? deriveTitle(session),
       updatedAt: new Date().toISOString(),
     }
     await this.store.save(toSave)
+    emitNewMessages(this.bus, toSave.id, toSave.messages, prevCount)
   }
 
   /**
@@ -222,4 +256,176 @@ export class SessionManager {
     const summary = generateSummary(session)
     return this.update(id, { summary })
   }
+
+  /**
+   * Export a session as portable JSON (for sharing / backup / migration).
+   */
+  async export(id: string): Promise<SessionExport | null> {
+    const session = await this.store.load(id)
+    if (!session) return null
+    return {
+      schemaVersion: SESSION_EXPORT_VERSION,
+      exportedAt: new Date().toISOString(),
+      sessionId: session.id,
+      session,
+    }
+  }
+
+  /**
+   * Import a session from exported JSON. Creates a NEW session (fresh id) so
+   * importing never overwrites existing data. Accepts either a raw SessionExport
+   * (schemaVersion >= 1) or a bare SessionState.
+   */
+  async import(data: unknown): Promise<SessionState | null> {
+    const session = coerceImportedSession(data)
+    if (!session) return null
+    const newId = `s-${randomUUID()}`
+    const imported: SessionState = {
+      ...session,
+      id: newId,
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      usage: session.usage ?? zeroUsage(),
+    }
+    await this.store.save(imported)
+    this.bus.emit({
+      kind: "session.imported",
+      sessionId: newId,
+      data: { sourceId: session.id, messageCount: imported.messages.length },
+    })
+    log("info", "session_manager.import", { newId, sourceId: session.id })
+    return imported
+  }
+
+  /**
+   * Search sessions by title, summary, and message content.
+   * Returns sessions with matching message snippets, newest first.
+   */
+  async search(query: string, limit = 20): Promise<SessionSearchResult[]> {
+    const q = query.trim().toLowerCase()
+    if (!q) return []
+    const entries = await this.store.list()
+    const results: SessionSearchResult[] = []
+    for (const entry of entries) {
+      const session = await this.store.load(entry.id)
+      if (!session) continue
+      const title = (session.title ?? "").toLowerCase()
+      const summary = (session.summary ?? "").toLowerCase()
+      const titleOrSummaryHit = title.includes(q) || summary.includes(q)
+      const matches: Array<{ role: string; content: string }> = []
+      for (const m of session.messages) {
+        const content = String(m.content)
+        const idx = content.toLowerCase().indexOf(q)
+        if (idx !== -1) {
+          // Extract a short snippet around the match.
+          const start = Math.max(0, idx - 40)
+          const snippet = (start > 0 ? "…" : "") + content.slice(start, idx + q.length + 80)
+          matches.push({ role: m.role, content: snippet })
+        }
+      }
+      if (titleOrSummaryHit || matches.length > 0) {
+        results.push({
+          id: session.id,
+          title: session.title ?? "Untitled",
+          summary: session.summary,
+          updatedAt: session.updatedAt,
+          matches: matches.slice(0, 5),
+        })
+      }
+      if (results.length >= limit) break
+    }
+    return results
+  }
+
+  /**
+   * Edit the content of a single message. Preserves id, role, timestamps.
+   * Returns the updated session, or null if the session/message doesn't exist.
+   */
+  async editMessage(id: string, messageId: string, content: string): Promise<SessionState | null> {
+    const session = await this.store.load(id)
+    if (!session) return null
+    const idx = session.messages.findIndex((m) => m.id === messageId)
+    if (idx === -1) return null
+    // Only user/assistant text messages are editable. Editing tool messages
+    // would corrupt tool-call pairing for COE truncation and LLM validation.
+    const msg = session.messages[idx]
+    if (msg.role !== "user" && msg.role !== "assistant") return null
+
+    const messages = session.messages.map((m, i) => {
+      if (i !== idx) return m
+      // Update both the plain-text content and any text part, keeping role/id.
+      const parts = m.parts?.map((p) => (p.type === "text" ? { ...p, text: content } : p))
+      return { ...m, content, parts } as SessionMessage
+    })
+
+    const updated: SessionState = {
+      ...session,
+      messages,
+      updatedAt: new Date().toISOString(),
+    }
+    await this.store.save(updated)
+    this.bus.emit({
+      kind: "session.updated",
+      sessionId: id,
+      data: { fields: ["messages"] },
+    })
+    return updated
+  }
+
+  /**
+   * Prepare a retry: truncate the session back to (and including) the last
+   * user message, so the loop can re-run from there. Returns the query to
+   * re-send, or null when no user message exists.
+   */
+  async retry(id: string): Promise<{ query: string } | null> {
+    const session = await this.store.load(id)
+    if (!session) return null
+    const lastUserIdx = session.messages.reduce((acc, m, i) => (m.role === "user" ? i : acc), -1)
+    if (lastUserIdx === -1) return null
+
+    const kept = session.messages.slice(0, lastUserIdx + 1)
+    const query = String(kept[kept.length - 1].content).replace(
+      /^\[Project context:[^\]]*\]\s*/,
+      "",
+    )
+    const updated: SessionState = {
+      ...session,
+      messages: kept,
+      updatedAt: new Date().toISOString(),
+    }
+    await this.store.save(updated)
+    this.bus.emit({ kind: "session.updated", sessionId: id, data: { fields: ["messages"] } })
+    return { query }
+  }
+}
+
+/**
+ * Validate + coerce an imported payload into a SessionState.
+ * Accepts a SessionExport envelope or a bare session object.
+ * Returns null on invalid input.
+ */
+function coerceImportedSession(data: unknown): SessionState | null {
+  if (typeof data !== "object" || data === null) return null
+  const raw = data as Record<string, unknown>
+  const session = (raw.session ?? raw) as Record<string, unknown> | undefined
+  if (typeof session !== "object" || session === null) return null
+
+  if (typeof session.id !== "string" || !session.id) return null
+  if (session.mode !== "plan" && session.mode !== "build") return null
+  if (
+    session.tier !== "trivial" &&
+    session.tier !== "standard" &&
+    session.tier !== "complex" &&
+    session.tier !== "escalate"
+  ) {
+    return null
+  }
+  if (!Array.isArray(session.messages)) return null
+  if (!Array.isArray(session.toolCalls)) session.toolCalls = []
+  if (!Array.isArray(session.fileChanges)) session.fileChanges = []
+  if (!Array.isArray(session.readFiles)) session.readFiles = []
+  if (typeof session.startedAt !== "string") session.startedAt = new Date().toISOString()
+  if (typeof session.updatedAt !== "string") session.updatedAt = new Date().toISOString()
+
+  return session as unknown as SessionState
 }

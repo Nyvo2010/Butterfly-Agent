@@ -1,113 +1,77 @@
 /**
  * Permission route group — manage human-in-the-loop permission requests.
- *
- * When the agent needs approval for a destructive operation (write/bash),
- * a permission request is published on the bus. The client displays it and
- * the user responds via this route. Inspired by OpenCode's permission route group.
- *
- * Permission requests are tracked in-memory (not persisted) since they are
- * transient runtime state.
  */
 
 import { randomUUID } from "node:crypto"
+import type { PermissionCategory } from "@butterfly/agent"
 import type { ServerApp } from "../app"
+import type { PendingPermissionEntry } from "../permission-store"
 import type { Router } from "../router"
 import { badRequest, notFound, ok } from "../router"
-
-interface PendingPermission {
-  requestId: string
-  sessionId: string
-  tool: string
-  question: string
-  options?: string[]
-  /** Resolver called when the user responds. */
-  resolve: (answer: string) => void
-  createdAt: string
-}
-
-const pending = new Map<string, PendingPermission>()
-
-export function registerPermissionRoutes(router: Router, _app: ServerApp): void {
-  // ── List pending permission requests ───────────────────────────────────
-  router.get("/api/permission", (ctx) => {
-    const sessionId = ctx.query.sessionId
-    const all = Array.from(pending.values())
-    const filtered = sessionId ? all.filter((p) => p.sessionId === sessionId) : all
-    ok(ctx.res, {
-      pending: filtered.map((p) => ({
-        requestId: p.requestId,
-        sessionId: p.sessionId,
-        tool: p.tool,
-        question: p.question,
-        options: p.options,
-        createdAt: p.createdAt,
-      })),
-    })
-  })
-
-  // ── Respond to a permission request ────────────────────────────────────
-  router.post("/api/permission/:requestId/reply", (ctx) => {
-    const req = pending.get(ctx.params.requestId)
-    if (!req) {
-      notFound(ctx.res, `Permission request not found: ${ctx.params.requestId}`)
-      return
-    }
-    const answer = String(ctx.body.answer ?? "")
-    if (!answer) {
-      badRequest(ctx.res, "answer is required")
-      return
-    }
-    req.resolve(answer)
-    pending.delete(ctx.params.requestId)
-    ok(ctx.res, { resolved: true, answer })
-  })
-}
 
 /** Default timeout for permission requests (5 minutes). */
 const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000
 
-/**
- * Create a permission request and wait for the user's response.
- * Used by the server's onAskUser callback — publishes a permission.requested
- * event on the bus, then blocks until the user responds via the HTTP route.
- *
- * This bridges the synchronous agent loop (which awaits onAskUser) with the
- * asynchronous HTTP client (which responds later).
- *
- * Times out after PERMISSION_TIMEOUT_MS (default 5 min) to prevent the agent
- * loop from hanging forever if the user never responds. Returns null on
- * timeout, which the agent loop treats as a denied permission.
- */
+export function registerPermissionRoutes(router: Router, app: ServerApp): void {
+  router.get("/api/permission", (ctx) => {
+    ok(ctx.res, { pending: app.permissionStore.list(ctx.query.sessionId) }, ctx.corsHeaders)
+  })
+
+  router.post("/api/permission/:requestId/reply", (ctx) => {
+    const req = app.permissionStore.get(ctx.params.requestId)
+    if (!req) {
+      notFound(ctx.res, `Permission request not found: ${ctx.params.requestId}`, ctx.corsHeaders)
+      return
+    }
+    const answer = String(ctx.body.answer ?? "")
+    if (!answer) {
+      badRequest(ctx.res, "answer is required", ctx.corsHeaders)
+      return
+    }
+    req.resolve(answer)
+    app.permissionStore.delete(ctx.params.requestId)
+    ok(ctx.res, { resolved: true, answer }, ctx.corsHeaders)
+  })
+}
+
 export function requestPermission(
   app: ServerApp,
   sessionId: string,
   tool: string,
   question: string,
   options?: string[],
+  category: PermissionCategory = "ask_user",
+  /** Override the default timeout (used by tests). */
+  timeoutMs: number = PERMISSION_TIMEOUT_MS,
 ): Promise<string | null> {
   return new Promise((resolve) => {
     const requestId = `perm-${randomUUID()}`
     let timedOut = false
+
     const timeout = setTimeout(() => {
       if (timedOut) return
       timedOut = true
-      pending.delete(requestId)
+      app.permissionStore.delete(requestId)
       app.bus.emit({
         kind: "permission.resolved",
         sessionId,
         data: { requestId, allowed: false },
       })
       resolve(null)
-    }, PERMISSION_TIMEOUT_MS)
+    }, timeoutMs)
 
-    const entry: PendingPermission = {
+    const entry: PendingPermissionEntry = {
       requestId,
       sessionId,
       tool,
+      category,
       question,
       options,
-      resolve: (answer: string) => {
+      createdAt: new Date().toISOString(),
+      timeout,
+      resolve: (answer: string | null) => {
         if (timedOut) return
+        timedOut = true
         clearTimeout(timeout)
         app.bus.emit({
           kind: "permission.resolved",
@@ -116,21 +80,17 @@ export function requestPermission(
         })
         resolve(answer)
       },
-      createdAt: new Date().toISOString(),
     }
-    pending.set(requestId, entry)
+
+    app.permissionStore.set(entry)
     app.bus.emit({
       kind: "permission.requested",
       sessionId,
-      data: { requestId, tool, question, options },
+      data: { requestId, tool, question, options, category },
     })
   })
 }
 
-/** Check if a session has any pending permission requests. */
-export function hasPendingPermissions(sessionId: string): boolean {
-  for (const p of pending.values()) {
-    if (p.sessionId === sessionId) return true
-  }
-  return false
+export function hasPendingPermissions(app: ServerApp, sessionId: string): boolean {
+  return app.permissionStore.hasPendingForSession(sessionId)
 }

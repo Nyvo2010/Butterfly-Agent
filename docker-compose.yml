@@ -1,0 +1,28 @@
+services:
+  butterfly:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${PORT:-3000}:3000"
+    volumes:
+      # Persist session data and config across container restarts.
+      - butterfly-data:/root/.butterfly
+      # Mount project directory for agent file access (read-write).
+      - ${PROJECT_DIR:-./}:/workspace
+    working_dir: /workspace
+    environment:
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+      - AGENT_LOG_LEVEL=${AGENT_LOG_LEVEL:-info}
+      - AGENT_MAX_STEPS=${AGENT_MAX_STEPS:-20}
+      - TRACE_ENABLED=${TRACE_ENABLED:-false}
+      - TRACE_EXPORTER=${TRACE_EXPORTER:-console}
+      - BUTTERFLY_API_KEY=${BUTTERFLY_API_KEY:-}
+      - BUTTERFLY_MODEL=${BUTTERFLY_MODEL:-}
+      - BUTTERFLY_CWD=/workspace
+      - PORT=${PORT:-3000}
+    restart: unless-stopped
+
+volumes:
+  butterfly-data:

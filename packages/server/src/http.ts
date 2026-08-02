@@ -1,27 +1,25 @@
 /**
- * Butterfly HTTP server — assembles all route groups into a node:http server.
- *
- * Inspired by OpenCode's HttpApiApp composition: route modules register
- * themselves on a Router, middleware handles cross-cutting concerns (CORS,
- * body parsing, errors), and the server delegates to the router.
- *
- * This is the network boundary — all logic lives in route modules + ServerApp.
+ * Butterfly HTTP server — assembles route groups + cross-cutting middleware.
  */
 
 import { createServer, type IncomingMessage } from "node:http"
 import type { ServerApp } from "./app"
-import { CORS_HEADERS, json, type RouteContext, Router, serverError } from "./router"
+import { checkRequestAuth, isPublicPath } from "./auth"
+import { buildCorsHeaders } from "./http/config"
+import { runRequestMiddleware } from "./http/middleware"
+import { json, type RouteContext, Router, serverError } from "./router"
 import { registerConfigRoutes } from "./routes/config"
 import { registerEventRoutes } from "./routes/event"
 import { registerFileRoutes } from "./routes/file"
 import { registerMCPRoutes } from "./routes/mcp"
+import { registerOpenApiRoutes } from "./routes/openapi"
 import { registerPermissionRoutes } from "./routes/permission"
 import { registerProviderRoutes } from "./routes/provider"
+import { registerSearchRoutes } from "./routes/search"
 import { registerSessionRoutes } from "./routes/session"
 
 const MAX_BODY_BYTES = 1_000_000
 
-/** Parse a JSON request body with a size limit. */
 async function parseBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     let data = ""
@@ -47,36 +45,18 @@ async function parseBody(req: IncomingMessage): Promise<Record<string, unknown>>
 }
 
 export interface HttpServerOptions {
-  /** Port to listen on (default 3000 or PORT env var). */
   port?: number
-  /** Host to bind (default 127.0.0.1). */
   host?: string
 }
 
 export interface HttpServerHandle {
-  /** The underlying http.Server. */
   server: ReturnType<typeof createServer>
-  /** Stop the server. */
   close: () => Promise<void>
 }
 
-/**
- * Create and start the Butterfly HTTP server with all routes registered.
- *
- * Route groups:
- *   - /api/sessions/*  — session CRUD, prompt, fork, abort, messages
- *   - /api/event       — global SSE event stream
- *   - /api/file/*      — read-only file browsing
- *   - /api/config/*    — config read
- *   - /api/mcp         — MCP server status
- *   - /api/providers   — provider list
- *   - /api/permission  — permission request management
- *   - /health          — health check
- */
 export function createHttpServer(app: ServerApp, _opts: HttpServerOptions = {}): HttpServerHandle {
   const router = new Router()
 
-  // Register all route groups.
   registerSessionRoutes(router, app)
   registerEventRoutes(router, app)
   registerFileRoutes(router, app)
@@ -84,25 +64,26 @@ export function createHttpServer(app: ServerApp, _opts: HttpServerOptions = {}):
   registerMCPRoutes(router, app)
   registerProviderRoutes(router, app)
   registerPermissionRoutes(router, app)
+  registerSearchRoutes(router, app)
+  registerOpenApiRoutes(router, app)
 
-  // ── Health check (outside the router, handled inline) ──────────────────
   router.get("/health", (ctx) => {
-    json(ctx.res, 200, {
-      status: "ok",
-      uptime: process.uptime(),
-      activeRuns: app.runState.count(),
-      model: app.butterflyConfig.model ?? "default",
-      routes: router.size(),
-    })
+    json(
+      ctx.res,
+      200,
+      {
+        status: "ok",
+        uptime: process.uptime(),
+        activeRuns: app.runState.count(),
+        model: app.butterflyConfig.model ?? "default",
+        routes: router.size(),
+        requestId: ctx.requestId,
+      },
+      ctx.corsHeaders,
+    )
   })
 
   const server = createServer(async (req, res) => {
-    // CORS preflight
-    if (req.method === "OPTIONS") {
-      res.writeHead(204, CORS_HEADERS).end()
-      return
-    }
-
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`)
     const pathname = url.pathname
     const method = req.method || "GET"
@@ -111,8 +92,32 @@ export function createHttpServer(app: ServerApp, _opts: HttpServerOptions = {}):
       query[key] = value
     }
 
+    const requestOrigin = req.headers.origin
+    const origin = typeof requestOrigin === "string" ? requestOrigin : undefined
+    const corsHeaders = buildCorsHeaders(app.httpConfig.cors, origin)
+
+    if (method === "OPTIONS") {
+      res.writeHead(204, corsHeaders).end()
+      return
+    }
+
+    const middleware = runRequestMiddleware(req, res, pathname, app.httpConfig, corsHeaders)
+    if (middleware.blocked) return
+
+    if (!isPublicPath(pathname) && app.authConfig.enabled) {
+      const authResult = checkRequestAuth(req.headers, app.authConfig)
+      if (!authResult.authenticated) {
+        json(
+          res,
+          401,
+          { error: authResult.reason ?? "Unauthorized", requestId: middleware.requestId },
+          corsHeaders,
+        )
+        return
+      }
+    }
+
     try {
-      // Parse body for methods that have one.
       let body: Record<string, unknown> = {}
       if (method === "POST" || method === "PATCH" || method === "PUT") {
         body = await parseBody(req)
@@ -125,15 +130,22 @@ export function createHttpServer(app: ServerApp, _opts: HttpServerOptions = {}):
         query,
         body,
         pathname,
+        corsHeaders,
+        requestId: middleware.requestId,
       }
 
       const matched = await router.dispatch(ctx)
       if (!matched) {
-        json(res, 404, { error: `Not found: ${method} ${pathname}` })
+        json(
+          res,
+          404,
+          { error: `Not found: ${method} ${pathname}`, requestId: middleware.requestId },
+          corsHeaders,
+        )
       }
     } catch (err) {
       if (!res.headersSent) {
-        serverError(res, (err as Error).message)
+        serverError(res, (err as Error).message, corsHeaders)
       }
     }
   })
@@ -147,10 +159,6 @@ export function createHttpServer(app: ServerApp, _opts: HttpServerOptions = {}):
   }
 }
 
-/**
- * Start the HTTP server listening on the given port.
- * Returns the HttpServerHandle once listening.
- */
 export function startHttpServer(
   app: ServerApp,
   opts: HttpServerOptions = {},

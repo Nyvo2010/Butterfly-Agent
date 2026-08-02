@@ -1,0 +1,26 @@
+{
+  "name": "@butterfly/acp-app",
+  "version": "0.1.0",
+  "description": "Butterfly Agent — ACP stdio server. Connect any ACP-compatible client (IDE, CLI, TUI).",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "butterfly-acp": "./src/index.ts"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "echo 'Use pnpm test from project root to run all tests'"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^0.4.9",
+    "@butterfly/acp": "workspace:*",
+    "@butterfly/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "tsx": "^4",
+    "typescript": "~5.7.3"
+  }
+}

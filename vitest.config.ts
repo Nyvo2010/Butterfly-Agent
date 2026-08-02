@@ -16,6 +16,7 @@ export default defineConfig({
       "@butterfly/agent": resolve(ROOT, "packages/agent/src/index.ts"),
       "@butterfly/server": resolve(ROOT, "packages/server/src/index.ts"),
       "@butterfly/acp": resolve(ROOT, "packages/acp/src/index.ts"),
+      "@butterfly/client": resolve(ROOT, "packages/client/src/index.ts"),
     },
   },
   test: {
